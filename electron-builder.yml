@@ -1,0 +1,19 @@
+appId: ai.deepseek.temporal-workspace
+productName: Temporal Workspace
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+# The SDK spawns the packaged DSH entry through Electron's Node mode. Its
+# package and transitive modules must remain ordinary filesystem files.
+asar: false
+npmRebuild: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

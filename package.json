@@ -1,0 +1,38 @@
+{
+  "name": "temporal-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop workspace for DeepSeek Harness sessions",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "dist:win": "electron-vite build && electron-builder --win nsis --x64",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "electron-vite preview"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0",
+    "@deepseek-ai/dsh": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-sdk-client": "0.1.7-rc.2",
+    "better-sqlite3": "^12.0.0",
+    "codemirror": "^6.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.0.0",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  },
+  "packageManager": "pnpm@11.25.0"
+}

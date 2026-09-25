@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+release/
+.npm-cache/
+.pnpm-store/
+.electron-cache/
+.tmp/
+*.tsbuildinfo
+*.log
