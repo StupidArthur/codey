@@ -1,5 +1,9 @@
 export type RoundMode = 'plan' | 'vibe' | 'loop'
 export type RoundStatus = 'active' | 'completed' | 'blocked' | 'budget_exhausted' | 'failed' | 'interrupted'
+export type ExecutionOutcome = 'completed' | 'failed' | 'blocked' | 'interrupted'
+
+/** Session-level permission preset. Plan/Vibe/Loop never escalate it. */
+export type PermissionPreset = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 /**
  * `new` — a Temporal Session with no DSH identity yet.
@@ -18,6 +22,7 @@ export interface SessionSummary {
   updatedAt: string
   hasTemporalHistory: boolean
   kind: SessionKind
+  permission: PermissionPreset
 }
 
 /** Result of a workspace listing: product records merged with ACP discovery. */
@@ -40,6 +45,55 @@ export interface RoundSummary {
   bodyMarkdown: string
 }
 
+export interface PlanVersionSummary {
+  id: string
+  ordinal: number
+  submittedSpec: string
+  planMarkdown: string
+  createdAt: string
+}
+
+export interface VibeEntrySummary {
+  id: string
+  ordinal: number
+  specMarkdown: string
+  assistantOutput: string
+  executionOutcome: ExecutionOutcome
+  createdAt: string
+}
+
+export interface EvidenceSummary {
+  id: string
+  kind: 'command' | 'workspace' | 'artifact' | 'manual' | 'runtime'
+  label: string
+  detail: string
+  outcome: 'passed' | 'failed' | 'observed'
+  provenance: 'tool' | 'user' | 'model'
+  observedAt: string
+}
+
+export interface LoopTerminalSummary {
+  status: 'completed' | 'blocked' | 'budget_exhausted' | 'failed'
+  reason: string
+}
+
+export interface ResultSummary {
+  summary: string
+  changes: string[]
+  verification: string[]
+  remaining: string[]
+  loopTerminal?: LoopTerminalSummary
+  createdAt: string
+}
+
+/** A Round plus its mode-specific projection. */
+export interface RoundDetail extends RoundSummary {
+  planVersions: PlanVersionSummary[]
+  vibeEntries: VibeEntrySummary[]
+  evidence: EvidenceSummary[]
+  result?: ResultSummary
+}
+
 export interface RunnerEvent {
   id: string
   at: string
@@ -57,7 +111,7 @@ export interface ModelSettings {
 export interface WorkspaceSnapshot {
   workspacePath: string | null
   session: SessionSummary | null
-  rounds: RoundSummary[]
+  rounds: RoundDetail[]
   /** Explicit state for the legacy-history placeholder; never fakes a History document. */
   historyState: HistoryState
   draft: string
@@ -65,6 +119,7 @@ export interface WorkspaceSnapshot {
   running: boolean
   runnerEvents: RunnerEvent[]
   settings: ModelSettings
+  permission: PermissionPreset
   error?: string
 }
 
@@ -76,6 +131,7 @@ export interface TemporalApi {
   saveDraft(draft: string, mode: RoundMode): Promise<void>
   submit(spec: string, mode: RoundMode): Promise<void>
   endRound(): Promise<void>
+  setPermission(preset: PermissionPreset): Promise<void>
   getModelSettings(): Promise<ModelSettings>
   saveModelSettings(settings: Omit<ModelSettings, 'hasCredential'> & { credential?: string }): Promise<ModelSettings>
   onSnapshot(listener: (snapshot: WorkspaceSnapshot) => void): () => void
@@ -89,6 +145,7 @@ export const IPC = {
   saveDraft: 'workspace:save-draft',
   submit: 'round:submit',
   endRound: 'round:end',
+  setPermission: 'settings:permission:set',
   getModelSettings: 'settings:model:get',
   saveModelSettings: 'settings:model:save',
   snapshotChanged: 'workspace:changed'

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
-import type { ModelSettings, RoundMode, RoundSummary, SessionSummary } from '../../shared/contracts'
+import type { ModelSettings, RoundDetail, RoundMode, RoundSummary, SessionSummary } from '../../shared/contracts'
 
 type SessionRow = {
   id: string
@@ -11,6 +11,7 @@ type SessionRow = {
   workspace_path: string
   updated_at: string
   has_temporal_history: number
+  permission: string
 }
 
 type RoundRow = {
@@ -57,6 +58,7 @@ export interface ResultDocument {
   changes: string[]
   verification: string[]
   remaining: string[]
+  createdAt: string
   loopTerminal?: {
     status: 'completed' | 'blocked' | 'budget_exhausted' | 'failed'
     reason: string
@@ -165,6 +167,10 @@ const migrations = [
       owner_token TEXT NOT NULL,
       expires_at_ms INTEGER NOT NULL
     );
+  `,
+  `
+    ALTER TABLE product_sessions ADD COLUMN permission TEXT NOT NULL DEFAULT 'workspace-write'
+      CHECK (permission IN ('read-only', 'workspace-write', 'danger-full-access'));
   `
 ] as const
 
@@ -232,8 +238,8 @@ export class ProductStore {
     const id = randomUUID()
     const now = new Date().toISOString()
     this.db.prepare(`
-      INSERT INTO product_sessions(id, dsh_session_id, workspace_path, title, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO product_sessions(id, dsh_session_id, workspace_path, title, created_at, updated_at, permission)
+      VALUES (?, ?, ?, ?, ?, ?, 'workspace-write')
     `).run(id, dshSessionId ?? null, workspacePath, title?.trim() || 'New Session', now, now)
     return this.getSession(id)!
   }
@@ -262,6 +268,37 @@ export class ProductStore {
       WHERE id = ? AND (dsh_session_id IS NULL OR dsh_session_id = ?)
     `).run(dshSessionId, new Date().toISOString(), productSessionId, dshSessionId)
     if (changed.changes !== 1) throw new Error('Product session is missing or bound to another DSH session')
+  }
+
+  getPermission(productSessionId: string): SessionSummary['permission'] {
+    const row = this.db.prepare('SELECT permission FROM product_sessions WHERE id = ?')
+      .get(productSessionId) as { permission: SessionSummary['permission'] } | undefined
+    if (!row) throw new Error(`Unknown product session: ${productSessionId}`)
+    return row.permission
+  }
+
+  setPermission(productSessionId: string, permission: SessionSummary['permission']): void {
+    const changed = this.db.prepare('UPDATE product_sessions SET permission = ?, updated_at = ? WHERE id = ?')
+      .run(permission, new Date().toISOString(), productSessionId)
+    if (changed.changes !== 1) throw new Error(`Unknown product session: ${productSessionId}`)
+  }
+
+  /** Full per-Round projection for the renderer: versions, entries, evidence and result. */
+  listRoundDetails(sessionId: string): RoundDetail[] {
+    return this.listRounds(sessionId).map((round) => ({
+      ...round,
+      planVersions: this.listPlanVersions(round.id).map((version, index) => ({
+        id: version.id, ordinal: index + 1, submittedSpec: version.submittedSpec,
+        planMarkdown: version.planMarkdown, createdAt: version.createdAt
+      })),
+      vibeEntries: this.listVibeEntries(round.id).map((entry, index) => ({
+        id: entry.id, ordinal: index + 1, specMarkdown: entry.specMarkdown,
+        assistantOutput: entry.assistantOutput, executionOutcome: entry.executionOutcome,
+        createdAt: entry.createdAt
+      })),
+      evidence: this.listEvidence(round.id),
+      ...(this.getResult(round.id) ? { result: this.getResult(round.id)! } : {})
+    }))
   }
 
   listRounds(sessionId: string): RoundSummary[] {
@@ -583,6 +620,7 @@ function toSessionSummary(row: SessionRow): SessionSummary {
     workspacePath: row.workspace_path,
     updatedAt: row.updated_at,
     hasTemporalHistory,
-    kind: hasTemporalHistory ? 'temporal' : row.dsh_session_id ? 'legacy' : 'new'
+    kind: hasTemporalHistory ? 'temporal' : row.dsh_session_id ? 'legacy' : 'new',
+    permission: (row.permission as SessionSummary['permission']) ?? 'workspace-write'
   }
 }

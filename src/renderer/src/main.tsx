@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { EditorView, basicSetup } from 'codemirror'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { ModelSettings, RoundMode, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
+import type { EvidenceSummary, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
 import './styles.css'
 
 const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'Vibe', loop: 'Loop' }
@@ -14,6 +14,80 @@ const kindLabels: Record<SessionSummary['kind'], string> = {
   new: '尚无 Temporal Round',
   temporal: 'Temporal Session',
   legacy: 'DSH 原生 Session · 无 Temporal Round'
+}
+const permissionLabels: Record<PermissionPreset, string> = {
+  'read-only': 'Read-only（只读）',
+  'workspace-write': 'Workspace-write（工作区可写，默认）',
+  'danger-full-access': 'Danger full access（完全访问）'
+}
+const evidenceKindLabels: Record<EvidenceSummary['kind'], string> = {
+  command: '命令', workspace: '工作区', artifact: '产物', manual: '人工', runtime: '运行时'
+}
+
+function ResultView({ result }: { result: ResultSummary }): React.JSX.Element {
+  return <div className="result-block">
+    {result.summary && <p className="result-summary">{result.summary}</p>}
+    {result.loopTerminal && <div className={`loop-terminal loop-${result.loopTerminal.status}`}><strong>Loop {statusLabels[result.loopTerminal.status] ?? result.loopTerminal.status}</strong><span>{result.loopTerminal.reason}</span></div>}
+    {result.changes.length > 0 && <section className="result-section"><h3>Changes</h3><ul>{result.changes.map(change => <li key={change}><code>{change}</code></li>)}</ul></section>}
+    {result.verification.length > 0 && <section className="result-section"><h3>Verification</h3><ul>{result.verification.map(line => <li key={line}>{line}</li>)}</ul></section>}
+    {result.remaining.length > 0 && <section className="result-section remaining"><h3>Remaining</h3><ul>{result.remaining.map(line => <li key={line}>{line}</li>)}</ul></section>}
+  </div>
+}
+
+function EvidenceList({ evidence }: { evidence: EvidenceSummary[] }): React.JSX.Element | null {
+  if (evidence.length === 0) return null
+  return <section className="evidence-block"><h3>Evidence</h3>
+    <div className="evidence-rows">{evidence.map(item => <div className={`evidence-row evidence-${item.outcome}`} key={item.id}>
+      <span className="evidence-kind">{evidenceKindLabels[item.kind]}</span>
+      <span className="evidence-label" title={item.detail}>{item.label}</span>
+      <span className="evidence-outcome">{item.outcome}</span>
+    </div>)}</div>
+  </section>
+}
+
+function RoundView({ round }: { round: RoundDetail }): React.JSX.Element {
+  const [versionIndex, setVersionIndex] = useState(Math.max(round.planVersions.length - 1, 0))
+  const header = <div className="document-header">
+    <div className="eyebrow">ROUND {round.sequence} · {modeLabels[round.mode]}</div>
+    <h1>{round.title}</h1>
+    <div className="document-meta"><span className={`status status-${round.status}`}>{statusLabels[round.status]}</span><span>{new Date(round.updatedAt).toLocaleString()}</span></div>
+  </div>
+
+  if (round.mode === 'plan') {
+    const version = round.planVersions[versionIndex]
+    return <article className="document">
+      {header}
+      {round.planVersions.length > 1 && <div className="version-tabs" role="tablist" aria-label="Plan 版本">
+        {round.planVersions.map((item, index) => <button key={item.id} role="tab" aria-selected={index === versionIndex} className={index === versionIndex ? 'active' : ''} onClick={() => setVersionIndex(index)}>v{item.ordinal}</button>)}
+      </div>}
+      <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version?.planMarkdown || round.bodyMarkdown || '本轮尚无计划。'}</ReactMarkdown></div>
+      {version && version.submittedSpec.trim() && version.submittedSpec.trim() !== (version.planMarkdown ?? '').trim() && <details className="submitted-spec"><summary>本次提交的 Spec</summary><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{version.submittedSpec}</ReactMarkdown></div></details>}
+      <EvidenceList evidence={round.evidence} />
+    </article>
+  }
+
+  if (round.mode === 'vibe') {
+    return <article className="document">
+      {header}
+      {round.result ? <ResultView result={round.result} /> : <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{round.bodyMarkdown || '本轮尚无结果。'}</ReactMarkdown></div>}
+      {round.vibeEntries.length > 0 && <section className="vibe-timeline"><h3>执行记录</h3>
+        {round.vibeEntries.map(entry => <details className="vibe-entry" key={entry.id}>
+          <summary><span>#{entry.ordinal}</span><span className="vibe-outcome">{entry.executionOutcome}</span><span className="vibe-time">{new Date(entry.createdAt).toLocaleString()}</span></summary>
+          <div className="vibe-entry-body">
+            <div className="vibe-spec"><h4>Spec</h4><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.specMarkdown}</ReactMarkdown></div></div>
+            <div className="vibe-output"><h4>输出</h4><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.assistantOutput || '（无输出）'}</ReactMarkdown></div></div>
+          </div>
+        </details>)}
+      </section>}
+      <EvidenceList evidence={round.evidence} />
+    </article>
+  }
+
+  return <article className="document">
+    {header}
+    {round.result ? <ResultView result={round.result} /> : <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{round.bodyMarkdown || '本轮尚未产生终态结果。'}</ReactMarkdown></div>}
+    <EvidenceList evidence={round.evidence} />
+  </article>
 }
 
 function messageOf(error: unknown): string {
@@ -81,6 +155,7 @@ function App(): React.JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<ModelSettings | null>(null)
+  const [permission, setPermission] = useState<PermissionPreset>('workspace-write')
   const [credential, setCredential] = useState('')
   const editorFocused = useRef(false)
   const localDraftDirty = useRef(false)
@@ -105,6 +180,7 @@ function App(): React.JSX.Element {
       setSelectedId(next.rounds.at(-1)?.id ?? null)
     }
     if (next.running && !previous?.running) setRunnerOpen(true)
+    if (previous?.running && !next.running) setRunnerOpen(false)
   }
 
   useEffect(() => {
@@ -188,8 +264,21 @@ function App(): React.JSX.Element {
 
   async function showSettings(): Promise<void> {
     setError('')
-    try { setSettings(await window.temporal.getModelSettings()); setCredential(''); setSettingsOpen(true) }
+    try {
+      setSettings(await window.temporal.getModelSettings())
+      setPermission(snapshotRef.current?.permission ?? 'workspace-write')
+      setCredential('')
+      setSettingsOpen(true)
+    }
     catch (e) { setError(messageOf(e)) }
+  }
+
+  async function changePermission(next: PermissionPreset): Promise<void> {
+    setError('')
+    try {
+      await window.temporal.setPermission(next)
+      setPermission(next)
+    } catch (e) { setError(messageOf(e)) }
   }
 
   async function saveSettings(): Promise<void> {
@@ -253,18 +342,18 @@ function App(): React.JSX.Element {
           {snapshot.running && !runnerOpen && <button className="runner-mini" onClick={() => setRunnerOpen(true)} aria-label="展开 Runner"><span className="live-dot"/><span className="runner-mini-label">正在运行 · 查看过程</span></button>}
         </aside>
         <section className="result-pane" aria-label="结果页面">
-          {selectedRound ? <article className="document"><div className="document-header"><div className="eyebrow">ROUND {selectedRound.sequence} · {modeLabels[selectedRound.mode]}</div><h1>{selectedRound.title}</h1><div className="document-meta"><span className={`status status-${selectedRound.status}`}>{statusLabels[selectedRound.status]}</span><span>{new Date(selectedRound.updatedAt).toLocaleString()}</span></div></div><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedRound.bodyMarkdown || '本轮尚无结果。'}</ReactMarkdown></div></article>
+          {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} />
             : snapshot.historyState === 'legacy-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">EXISTING DSH SESSION</div><h1>Historical transcript unavailable</h1><p>该 DSH Session 的旧对话无法通过公开接口读取。旧历史只读继承、不重建 Temporal Round；第一次提交将沿用此 Session 并创建 Round 1。</p></div></article>
             : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           {runnerOpen && <section className="runner-panel" aria-label="Runner 事件"><div className="runner-header"><div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{snapshot.running ? 'Running' : 'Runner'}</strong><span>{modeLabels[mode]}</span></div><button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div><div className="runner-events" role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span>{event.kind}</span><p>{event.message}</p></div>) : <p className="runner-empty">等待运行事件…</p>}</div></section>}
         </section>
-        <section className="spec-pane" aria-label="Spec 编辑器"><div className="spec-toolbar"><div className="segmented" aria-label="运行模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={snapshot.running || busy || item === 'loop'} title={item === 'loop' ? 'Loop 尚未通过架构验收' : undefined} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
+        <section className="spec-pane" aria-label="Spec 编辑器"><div className="spec-toolbar"><div className="segmented" aria-label="运行模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={snapshot.running || busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
           <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true"># Spec<br/><br/>描述希望完成的工作…</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
-          <div className="spec-footer"><p>{mode === 'loop' ? 'Loop 尚未通过架构验收，暂不可提交' : snapshot.running ? '当前任务正在执行' : 'Spec 会自动保存到当前 Session'}</p><div className="footer-actions"><button className="secondary-button" onClick={endRound} disabled={busy || snapshot.running || !snapshot.rounds.some(round => round.status === 'active')}>结束当前轮次</button><button className="primary-button" onClick={submit} disabled={busy || snapshot.running || mode === 'loop' || !draft.trim()}>{snapshot.running ? '运行中…' : '提交'}</button></div></div>
+          <div className="spec-footer"><p>{mode === 'loop' ? 'Loop 将自动连续执行直到完成或触及预算' : snapshot.running ? '当前任务正在执行' : 'Spec 会自动保存到当前 Session'}</p><div className="footer-actions"><button className="secondary-button" onClick={endRound} disabled={busy || snapshot.running || !snapshot.rounds.some(round => round.status === 'active')}>结束当前轮次</button><button className="primary-button" onClick={submit} disabled={busy || snapshot.running || !draft.trim()}>{snapshot.running ? '运行中…' : '提交'}</button></div></div>
         </section>
       </main>}
 
-    {settingsOpen && settings && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setSettingsOpen(false) }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="dialog-header"><div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">模型设置</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="关闭设置">×</button></div>{error && <div className="dialog-error" role="alert">{error}</div>}<div className="settings-fields"><label>Provider<input value={settings.provider} onChange={event => setSettings({ ...settings, provider: event.target.value })} placeholder="deepseek-official"/></label><label>Model<input value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} placeholder="模型名称"/></label><label>Base URL <small>可选</small><input value={settings.baseUrl ?? ''} onChange={event => setSettings({ ...settings, baseUrl: event.target.value })} placeholder="https://…"/></label><label>API 凭证 <small>{settings.hasCredential ? '已保存；留空则保持原凭证' : '尚未保存'}</small><input type="password" autoComplete="new-password" value={credential} onChange={event => setCredential(event.target.value)} placeholder={settings.hasCredential ? '输入新凭证以替换' : '输入 API 凭证'}/></label></div><div className="dialog-actions"><button className="secondary-button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary-button" onClick={saveSettings} disabled={busy || !settings.provider.trim() || !settings.model.trim()}>保存设置</button></div></section></div>}
+    {settingsOpen && settings && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setSettingsOpen(false) }}><section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="dialog-header"><div><div className="eyebrow">PREFERENCES</div><h2 id="settings-title">模型设置</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="关闭设置">×</button></div>{error && <div className="dialog-error" role="alert">{error}</div>}<div className="settings-fields"><label>Provider<input value={settings.provider} onChange={event => setSettings({ ...settings, provider: event.target.value })} placeholder="deepseek-official"/></label><label>Model<input value={settings.model} onChange={event => setSettings({ ...settings, model: event.target.value })} placeholder="模型名称"/></label><label>Base URL <small>可选</small><input value={settings.baseUrl ?? ''} onChange={event => setSettings({ ...settings, baseUrl: event.target.value })} placeholder="https://…"/></label><label>会话权限 <small>对当前 Session 生效，运行中不可修改</small><select value={permission} onChange={event => void changePermission(event.target.value as PermissionPreset)} disabled={snapshot?.running || busy}>{(['read-only', 'workspace-write', 'danger-full-access'] as const).map(item => <option key={item} value={item}>{permissionLabels[item]}</option>)}</select></label><label>API 凭证 <small>{settings.hasCredential ? '已保存；留空则保持原凭证' : '尚未保存'}</small><input type="password" autoComplete="new-password" value={credential} onChange={event => setCredential(event.target.value)} placeholder={settings.hasCredential ? '输入新凭证以替换' : '输入 API 凭证'}/></label></div><div className="dialog-actions"><button className="secondary-button" onClick={() => setSettingsOpen(false)}>取消</button><button className="primary-button" onClick={saveSettings} disabled={busy || !settings.provider.trim() || !settings.model.trim()}>保存设置</button></div></section></div>}
   </div>
 }
 

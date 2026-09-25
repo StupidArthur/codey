@@ -6,7 +6,6 @@ import { CredentialVault } from './settings/CredentialVault'
 import { WindowController } from './WindowController'
 
 const controllers = new Map<number, WindowController>()
-const sessionOwners = new Map<string, number>()
 const pendingDisposals = new Set<Promise<void>>()
 let store: ProductStore
 let vault: CredentialVault
@@ -22,20 +21,6 @@ function controllerFor(senderId: number): WindowController {
   const controller = controllers.get(senderId)
   if (!controller) throw new Error('Window controller unavailable')
   return controller
-}
-
-function claimSession(sessionId: string, windowId: number): void {
-  const owner = sessionOwners.get(sessionId)
-  if (owner !== undefined && owner !== windowId) {
-    const existing = BrowserWindow.fromId(owner)
-    existing?.focus()
-    throw new Error('此 Session 已在另一个窗口打开。')
-  }
-  sessionOwners.set(sessionId, windowId)
-}
-
-function releaseSession(sessionId: string, windowId: number): void {
-  if (sessionOwners.get(sessionId) === windowId) sessionOwners.delete(sessionId)
 }
 
 function createWindow(): void {
@@ -55,7 +40,7 @@ function createWindow(): void {
   })
 
   const webContentsId = window.webContents.id
-  controllers.set(webContentsId, new WindowController(window, store, vault, claimSession, releaseSession))
+  controllers.set(webContentsId, new WindowController(window, store, vault))
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => {
     const controller = controllers.get(webContentsId)
@@ -83,6 +68,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.saveDraft, (event, draft, mode) => controllerFor(event.sender.id).saveDraft(draft, mode))
   ipcMain.handle(IPC.submit, (event, spec, mode) => controllerFor(event.sender.id).submit(spec, mode))
   ipcMain.handle(IPC.endRound, (event) => controllerFor(event.sender.id).endRound())
+  ipcMain.handle(IPC.setPermission, (event, preset) => controllerFor(event.sender.id).setPermission(preset))
   ipcMain.handle(IPC.getModelSettings, (event) => controllerFor(event.sender.id).getModelSettings())
   ipcMain.handle(IPC.saveModelSettings, (event, settings) => controllerFor(event.sender.id).saveModelSettings(settings))
 }

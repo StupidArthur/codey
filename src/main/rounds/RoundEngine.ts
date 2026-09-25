@@ -1,0 +1,188 @@
+import { randomUUID } from 'node:crypto'
+import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunnerEvent, SessionSummary } from '../../shared/contracts'
+import type { DshRuntime } from '../dsh/DshRuntime'
+import type { EvidenceBundle, EvidenceCollector } from '../evidence/EvidenceCollector'
+import { LoopController } from '../loop/LoopController'
+import type { ProductStore } from '../persistence/ProductStore'
+import type { ResultBuilder } from '../result/ResultBuilder'
+
+export interface RoundEngineDeps {
+  store: ProductStore
+  /** Lazily start the window's runtime and return it. */
+  ensureRuntime: () => Promise<DshRuntime>
+  evidence: EvidenceCollector
+  resultBuilder: ResultBuilder
+  /** Returns and clears the runner events accumulated since the last execution. */
+  takeEvents: () => RunnerEvent[]
+  /** Persist the DSH session id after a lazy create. */
+  onDshSessionCreated?: (dshSessionId: string) => void
+  onRoundChanged?: () => Promise<void> | void
+}
+
+export interface SubmitInput {
+  session: SessionSummary
+  mode: RoundMode
+  spec: string
+}
+
+/**
+ * Turns one user submit into a product Round. Plan/Vibe reuse their open
+ * Round; Loop always creates a fresh Round and runs to a terminal state.
+ */
+export class RoundEngine {
+  constructor(private readonly deps: RoundEngineDeps) {}
+
+  async submit(input: SubmitInput): Promise<{ roundId: string; outcome: ExecutionOutcome }> {
+    const { store } = this.deps
+    const rounds = store.listRounds(input.session.id)
+    const open = rounds.at(-1)
+    if (open?.status === 'active' && open.mode !== input.mode) await this.finalize(input.session, open)
+    if (open?.status === 'active' && open.mode === 'loop') await this.finalizeLoopInterrupted(input.session, open)
+
+    if (input.mode === 'loop') return this.submitLoop(input)
+
+    const current = store.listRounds(input.session.id).at(-1)
+    const round = current?.status === 'active' && current.mode === input.mode
+      ? current
+      : this.createRound(input.session, input.mode, input.spec)
+    store.markRoundExecutionStarted(input.session.id, round.id)
+    try {
+      const runtime = await this.deps.ensureRuntime()
+      const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      const { text } = await runtime.prompt(input.spec)
+      const evidence = await this.deps.evidence.collect(input.session.workspacePath, baseline, this.deps.takeEvents(), 'completed')
+      this.saveEvidence(round.id, evidence)
+      if (input.mode === 'plan') {
+        store.appendPlanVersion(round.id, { id: randomUUID(), submittedSpec: input.spec, planMarkdown: text, createdAt: new Date().toISOString() })
+      } else {
+        store.appendVibeEntry(round.id, { id: randomUUID(), specMarkdown: input.spec, assistantOutput: text, executionOutcome: 'completed', createdAt: new Date().toISOString() })
+      }
+      round.bodyMarkdown = text
+      round.updatedAt = new Date().toISOString()
+      store.saveRound(input.session.id, round)
+      store.markRoundExecutionFinished(input.session.id, round.id, 'active')
+      if (round.title === 'New Session' || !round.title) round.title = titleFor(input.spec, input.mode)
+      await this.deps.onRoundChanged?.()
+      return { roundId: round.id, outcome: 'completed' }
+    } catch (error) {
+      this.terminate(input.session, round, 'failed')
+      await this.deps.onRoundChanged?.()
+      throw error
+    }
+  }
+
+  async endCurrent(session: SessionSummary): Promise<void> {
+    const open = this.deps.store.listRounds(session.id).at(-1)
+    if (open?.status === 'active') await this.finalize(session, open)
+  }
+
+  private async submitLoop(input: SubmitInput): Promise<{ roundId: string; outcome: ExecutionOutcome }> {
+    const { store } = this.deps
+    const round = this.createRound(input.session, 'loop', input.spec)
+    store.markRoundExecutionStarted(input.session.id, round.id)
+    try {
+      const runtime = await this.deps.ensureRuntime()
+      const loop = new LoopController(runtime, this.deps.evidence)
+      const result = await loop.run({ rootSpec: input.spec, workspacePath: input.session.workspacePath, takeEvents: this.deps.takeEvents })
+      this.saveEvidence(round.id, result.evidence)
+      const document = this.deps.resultBuilder.build({
+        finalResponse: result.finalResponse,
+        evidence: result.evidence,
+        outcome: result.terminal.status === 'completed' ? 'completed' : 'failed',
+        loopTerminal: result.terminal
+      })
+      store.saveResult(round.id, document)
+      this.terminate(input.session, round, toRoundStatus(result.terminal.status), result.finalResponse)
+      await this.deps.onRoundChanged?.()
+      return { roundId: round.id, outcome: result.terminal.status === 'completed' ? 'completed' : 'failed' }
+    } catch (error) {
+      this.terminate(input.session, round, 'failed')
+      await this.deps.onRoundChanged?.()
+      throw error
+    }
+  }
+
+  /** Finalize an open Plan/Vibe Round; Vibe gets a top-level Result document. */
+  private async finalize(session: SessionSummary, round: RoundSummary): Promise<void> {
+    const { store } = this.deps
+    if (round.mode === 'vibe') {
+      const entries = store.listVibeEntries(round.id)
+      const last = entries.at(-1)
+      const evidence = bundleFromRecords(store.listEvidence(round.id))
+      const document = this.deps.resultBuilder.build({
+        finalResponse: last?.assistantOutput ?? '',
+        evidence,
+        outcome: last?.executionOutcome ?? 'completed'
+      })
+      store.saveResult(round.id, document)
+    }
+    round.status = 'completed'
+    round.updatedAt = new Date().toISOString()
+    store.saveRound(session.id, round)
+    await this.deps.onRoundChanged?.()
+  }
+
+  /** Move a Round to a terminal status, tolerating an already-inactive runtime. */
+  private terminate(session: SessionSummary, round: RoundSummary, status: RoundStatus, body?: string): void {
+    round.updatedAt = new Date().toISOString()
+    if (body !== undefined) round.bodyMarkdown = body
+    try { this.deps.store.markRoundExecutionFinished(session.id, round.id, status) }
+    catch { /* runtime already inactive; the status write below is what matters */ }
+    round.status = status
+    this.deps.store.saveRound(session.id, round)
+  }
+
+  private async finalizeLoopInterrupted(session: SessionSummary, round: RoundSummary): Promise<void> {
+    this.terminate(session, round, 'interrupted')
+  }
+
+  private createRound(session: SessionSummary, mode: RoundMode, spec: string): RoundSummary {
+    const rounds = this.deps.store.listRounds(session.id)
+    const title = titleFor(spec, mode)
+    if (session.title === 'New Session') {
+      session.title = title
+      this.deps.store.saveSession(session)
+    }
+    const round: RoundSummary = {
+      id: randomUUID(),
+      sequence: rounds.length + 1,
+      mode,
+      status: 'active',
+      title,
+      updatedAt: new Date().toISOString(),
+      bodyMarkdown: ''
+    }
+    this.deps.store.saveRound(session.id, round)
+    return round
+  }
+
+  private saveEvidence(roundId: string, evidence: EvidenceBundle): void {
+    for (const record of this.deps.evidence.toRecords(evidence)) this.deps.store.saveEvidence(roundId, record)
+  }
+}
+
+function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
+  const changedFiles: string[] = []
+  const newFiles: string[] = []
+  const verification: EvidenceBundle['verification'] = []
+  let gitDiffSummary: string | undefined
+  for (const record of records) {
+    if (record.kind === 'workspace' && record.label === 'git diff --stat') { gitDiffSummary = record.detail; continue }
+    if (record.kind === 'workspace') {
+      changedFiles.push(record.label)
+      if (record.detail === 'created') newFiles.push(record.label)
+    } else if (record.kind === 'command') {
+      verification.push({ label: record.label, detail: record.detail, outcome: record.outcome === 'observed' ? 'observed' : record.outcome, provenance: 'tool' })
+    }
+  }
+  return { changedFiles, newFiles, ...(gitDiffSummary ? { gitDiffSummary } : {}), verification, outcome: 'completed' }
+}
+
+function toRoundStatus(status: LoopTerminalSummary['status']): RoundStatus {
+  return status
+}
+
+function titleFor(spec: string, mode: RoundMode): string {
+  const line = spec.split('\n').find((part) => part.trim() && !part.trimStart().startsWith('#'))
+  return line?.trim().slice(0, 64) || mode
+}

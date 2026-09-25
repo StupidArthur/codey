@@ -9,6 +9,7 @@ const temporal: TemporalApi = {
   saveDraft: (draft: string, mode: RoundMode) => ipcRenderer.invoke(IPC.saveDraft, draft, mode),
   submit: (spec: string, mode: RoundMode) => ipcRenderer.invoke(IPC.submit, spec, mode),
   endRound: () => ipcRenderer.invoke(IPC.endRound),
+  setPermission: (preset) => ipcRenderer.invoke(IPC.setPermission, preset),
   getModelSettings: () => ipcRenderer.invoke(IPC.getModelSettings),
   saveModelSettings: (settings: Omit<ModelSettings, 'hasCredential'> & { credential?: string }) =>
     ipcRenderer.invoke(IPC.saveModelSettings, settings),

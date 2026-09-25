@@ -1,12 +1,17 @@
-import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import type { BrowserWindow } from 'electron'
-import type { ModelSettings, RoundMode, RoundSummary, RunnerEvent, SessionListResult, SessionSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type {
+  ModelSettings, PermissionPreset, RoundMode, RunnerEvent,
+  SessionListResult, SessionSummary, WorkspaceSnapshot
+} from '../shared/contracts'
 import { IPC } from '../shared/contracts'
 import { DshRuntime } from './dsh/DshRuntime'
 import { SessionDiscovery, type DiscoveredDshSession } from './dsh/SessionDiscovery'
 import { historyStateFor, mergeSessions } from './dsh/sessionMerge'
-import { ProductStore } from './persistence/ProductStore'
+import { EvidenceCollector } from './evidence/EvidenceCollector'
+import { ProductStore, type SessionLease } from './persistence/ProductStore'
+import { ResultBuilder } from './result/ResultBuilder'
+import { RoundEngine } from './rounds/RoundEngine'
 import { CredentialVault } from './settings/CredentialVault'
 
 /** Owns exactly one workspace and product session for one BrowserWindow. */
@@ -14,18 +19,34 @@ export class WindowController {
   private workspacePath: string | null = null
   private session: SessionSummary | null = null
   private runtime: DshRuntime | null = null
+  private lease: SessionLease | null = null
   private running = false
   private runnerEvents: RunnerEvent[] = []
+  private pendingEvidenceEvents: RunnerEvent[] = []
   private error: string | undefined
   private readonly discovery = new SessionDiscovery()
+  private readonly evidence = new EvidenceCollector()
+  private readonly resultBuilder = new ResultBuilder()
+  private readonly engine: RoundEngine
 
   constructor(
     private readonly window: BrowserWindow,
     private readonly store: ProductStore,
-    private readonly vault: CredentialVault,
-    private readonly claimSession: (sessionId: string, windowId: number) => void,
-    private readonly releaseSession: (sessionId: string, windowId: number) => void
-  ) {}
+    private readonly vault: CredentialVault
+  ) {
+    this.engine = new RoundEngine({
+      store,
+      ensureRuntime: () => this.ensureRuntime(),
+      evidence: this.evidence,
+      resultBuilder: this.resultBuilder,
+      takeEvents: () => {
+        const events = this.pendingEvidenceEvents
+        this.pendingEvidenceEvents = []
+        return events
+      },
+      onRoundChanged: async () => { await this.emitSnapshot() }
+    })
+  }
 
   async listSessions(path: string): Promise<SessionListResult> {
     const workspacePath = await realpath(path)
@@ -35,7 +56,6 @@ export class WindowController {
     try {
       discovered = await this.discovery.listByWorkspace(workspacePath)
     } catch (error) {
-      // Product records stay usable when public ACP discovery fails.
       discoveryError = error instanceof Error ? error.message : String(error)
     }
     return { sessions: mergeSessions(product, discovered, workspacePath), ...(discoveryError ? { discoveryError } : {}) }
@@ -59,27 +79,29 @@ export class WindowController {
 
     if (this.session?.id === nextSession.id) return this.getSnapshot()
 
-    const nextDshId = this.store.getDshSessionId(nextSession.id)
-    this.claimSession(`product:${nextSession.id}`, this.window.id)
-    if (nextDshId) this.claimSession(`dsh:${nextDshId}`, this.window.id)
-    try {
-      await this.releaseCurrent()
-      this.workspacePath = workspacePath
-      this.session = nextSession
-      this.runnerEvents = []
-      this.error = undefined
-      return await this.emitSnapshot()
-    } catch (error) {
-      this.releaseSession(`product:${nextSession.id}`, this.window.id)
-      if (nextDshId) this.releaseSession(`dsh:${nextDshId}`, this.window.id)
-      throw error
-    }
+    this.store.reconcileInterruptedRounds(nextSession.id)
+    const nextLease = this.store.acquireSessionLease(nextSession.id, () => {
+      this.error = 'Session 的独占锁已丢失，请重新打开。'
+      void this.closeRuntime()
+      void this.emitSnapshot()
+    })
+    await this.releaseCurrent()
+    this.lease = nextLease
+    this.workspacePath = workspacePath
+    this.session = nextSession
+    this.runnerEvents = []
+    this.pendingEvidenceEvents = []
+    this.error = undefined
+    return this.emitSnapshot()
   }
 
   async getSnapshot(): Promise<WorkspaceSnapshot> {
+    // Re-read the projection so derived fields (kind, hasTemporalHistory,
+    // permission, DSH id) reflect the latest committed state.
+    if (this.session) this.session = this.store.getSession(this.session.id) ?? this.session
     const settings = await this.getModelSettings()
     const draft = this.session ? this.store.getDraft(this.session.id) : { draft: '', mode: 'plan' as RoundMode }
-    const rounds = this.session ? this.store.listRounds(this.session.id) : []
+    const rounds = this.session ? this.store.listRoundDetails(this.session.id) : []
     return {
       workspacePath: this.workspacePath,
       session: this.session,
@@ -90,20 +112,13 @@ export class WindowController {
       running: this.running,
       runnerEvents: [...this.runnerEvents],
       settings,
+      permission: this.session?.permission ?? 'workspace-write',
       ...(this.error ? { error: this.error } : {})
     }
   }
 
   async saveDraft(draft: string, mode: RoundMode): Promise<void> {
     const session = this.requireSession()
-    if (!this.running) {
-      const latest = this.store.listRounds(session.id).at(-1)
-      if (latest?.status === 'active' && latest.mode !== mode) {
-        latest.status = 'completed'
-        latest.updatedAt = new Date().toISOString()
-        this.store.saveRound(session.id, latest)
-      }
-    }
     this.store.saveDraft(session.id, draft, mode)
     await this.emitSnapshot()
   }
@@ -117,86 +132,46 @@ export class WindowController {
     if (!settings.provider.trim() || !settings.model.trim()) throw new Error('请填写 Provider 和 Model。')
     if (settings.credential) await this.vault.setCredential(settings.credential)
     this.store.saveModelSettings(settings)
-    if (this.runtime) {
-      await this.runtime.close()
-      this.runtime = null
-    }
+    await this.closeRuntime()
     const saved = await this.getModelSettings()
     await this.emitSnapshot()
     return saved
+  }
+
+  async setPermission(preset: PermissionPreset): Promise<void> {
+    const session = this.requireSession()
+    if (this.running) throw new Error('运行期间不能修改权限。')
+    this.store.setPermission(session.id, preset)
+    this.session = { ...session, permission: preset }
+    await this.closeRuntime()
+    await this.emitSnapshot()
   }
 
   async submit(spec: string, mode: RoundMode): Promise<void> {
     const session = this.requireSession()
     if (this.running) throw new Error('当前已有执行任务。')
     if (!spec.trim()) throw new Error('Spec 不能为空。')
-    if (mode === 'loop') throw new Error('Loop Controller 尚未接入真实验证与预算控制。')
-
     const settings = await this.getModelSettings()
     if (!settings.provider || !settings.model) throw new Error('请先配置模型 Provider 和 Model。')
+
     const submittedRevision = this.store.getDraftWithRevision(session.id).revision
     this.running = true
     this.error = undefined
     this.runnerEvents = []
+    this.pendingEvidenceEvents = []
     await this.emitSnapshot()
 
-    let round: RoundSummary | undefined
-    let newDshId: string | undefined
     try {
-      if (!this.runtime) {
-        this.runtime = new DshRuntime({
-          workspacePath: session.workspacePath,
-          settings,
-          credential: await this.vault.getCredential(),
-          onEvent: (event) => this.appendRunnerEvent(event)
-        })
-        const dshSessionId = this.store.getDshSessionId(session.id)
-        const started = await this.runtime.start(dshSessionId)
-        if (!dshSessionId) newDshId = started.sessionId
-      }
-
-      const rounds = this.store.listRounds(session.id)
-      const latest = rounds.at(-1)
-      if (latest?.status === 'active' && latest.mode !== mode) {
-        latest.status = 'completed'
-        latest.updatedAt = new Date().toISOString()
-        this.store.saveRound(session.id, latest)
-      }
-      round = latest && latest.mode === mode && latest.status === 'active'
-        ? latest
-        : {
-            id: randomUUID(), sequence: rounds.length + 1, mode, status: 'active',
-            title: spec.split('\n').find((line) => line.trim() && !line.startsWith('#'))?.slice(0, 64) || mode,
-            updatedAt: new Date().toISOString(), bodyMarkdown: ''
-          }
-      this.store.saveRound(session.id, round)
-      const result = await this.runtime.prompt(spec)
-      if (newDshId) {
-        this.claimSession(`dsh:${newDshId}`, this.window.id)
-        this.store.setDshSessionId(session.id, newDshId)
-      }
-      // The SDK response is preserved verbatim. ResultBuilder will later add evidence-backed sections.
-      round.bodyMarkdown = round.bodyMarkdown
-        ? `${round.bodyMarkdown}\n\n---\n\n${result.text}`
-        : result.text
-      round.updatedAt = new Date().toISOString()
-      this.store.saveRound(session.id, round)
+      await this.engine.submit({ session, mode, spec })
       this.store.clearDraftIfRevision(session.id, submittedRevision)
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error)
-      if (this.runtime) {
-        await this.runtime.close()
-        this.runtime = null
-      }
-      if (round) {
-        round.status = 'failed'
-        round.updatedAt = new Date().toISOString()
-        this.store.saveRound(session.id, round)
-      }
+      await this.closeRuntime()
       throw error
     } finally {
       this.running = false
       this.runnerEvents = []
+      this.pendingEvidenceEvents = []
       await this.emitSnapshot()
     }
   }
@@ -204,11 +179,7 @@ export class WindowController {
   async endRound(): Promise<void> {
     const session = this.requireSession()
     if (this.running) throw new Error('运行期间不能结束当前轮次。')
-    const latest = this.store.listRounds(session.id).at(-1)
-    if (!latest || latest.status !== 'active') return
-    latest.status = 'completed'
-    latest.updatedAt = new Date().toISOString()
-    this.store.saveRound(session.id, latest)
+    await this.engine.endCurrent(session)
     await this.emitSnapshot()
   }
 
@@ -221,11 +192,43 @@ export class WindowController {
     return this.session
   }
 
-  /**
-   * First open of a discovered legacy DSH Session creates its product projection.
-   * Membership is verified against public ACP discovery so a fabricated id cannot
-   * create a phantom projection.
-   */
+  private async ensureRuntime(): Promise<DshRuntime> {
+    if (this.runtime) return this.runtime
+    const session = this.requireSession()
+    const settings = await this.getModelSettings()
+    const runtime = new DshRuntime({
+      workspacePath: session.workspacePath,
+      settings,
+      credential: await this.vault.getCredential(),
+      permission: session.permission,
+      onEvent: (event) => this.appendRunnerEvent(event)
+    })
+    const existing = this.store.getDshSessionId(session.id)
+    const started = await runtime.start(existing)
+    if (!existing) {
+      this.store.setDshSessionId(session.id, started.sessionId)
+      this.session = { ...session, dshSessionId: started.sessionId, kind: session.kind === 'new' ? 'legacy' : session.kind }
+    }
+    this.runtime = runtime
+    return runtime
+  }
+
+  private async closeRuntime(): Promise<void> {
+    const runtime = this.runtime
+    this.runtime = null
+    if (runtime) await runtime.close()
+  }
+
+  private async releaseCurrent(): Promise<void> {
+    await this.closeRuntime()
+    const lease = this.lease
+    this.lease = null
+    if (lease) {
+      try { lease.assertHeld() } catch { /* already lost */ }
+      lease.release()
+    }
+  }
+
   private async projectDiscoveredSession(workspacePath: string, dshSessionId: string): Promise<SessionSummary> {
     const existing = this.store.getSessionByDshId(dshSessionId)
     if (existing) {
@@ -238,21 +241,11 @@ export class WindowController {
     return this.store.createSession(workspacePath, match.id, match.title ?? 'Existing DSH Session')
   }
 
-  private async releaseCurrent(): Promise<void> {
-    if (this.runtime) {
-      await this.runtime.close()
-      this.runtime = null
-    }
-    if (this.session) {
-      this.releaseSession(`product:${this.session.id}`, this.window.id)
-      const dshId = this.store.getDshSessionId(this.session.id)
-      if (dshId) this.releaseSession(`dsh:${dshId}`, this.window.id)
-    }
-  }
-
   private appendRunnerEvent(event: RunnerEvent): void {
     this.runnerEvents.push(event)
     if (this.runnerEvents.length > 200) this.runnerEvents.shift()
+    this.pendingEvidenceEvents.push(event)
+    if (this.pendingEvidenceEvents.length > 1000) this.pendingEvidenceEvents.shift()
     void this.emitSnapshot()
   }
 

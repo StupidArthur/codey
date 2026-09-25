@@ -24,7 +24,8 @@ export function mergeSessions(
       workspacePath: item.workspacePath || workspacePath,
       updatedAt: item.updatedAt ?? '',
       hasTemporalHistory: false,
-      kind: 'legacy'
+      kind: 'legacy',
+      permission: 'workspace-write'
     })
   }
   merged.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))

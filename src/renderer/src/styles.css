@@ -11,3 +11,44 @@
 .code-editor .cm-gutters{background:#fbfcfe;border-right:1px solid #edf1f5;color:#9aa8b8}
 .code-editor .cm-activeLine,.code-editor .cm-activeLineGutter{background:#f5f9ff}
 .editor-placeholder{position:absolute;top:17px;left:53px;color:#9aa8b8;font:12px/1.65 Consolas,"Cascadia Code",monospace;pointer-events:none}
+
+/* --- Round projections: Plan versions, Vibe entries, Evidence, Results --- */
+.settings-fields select{width:100%;padding:10px 11px;border:1px solid #dce4ed;border-radius:9px;background:#fbfcfe;color:#1a2839;font-size:12px}
+.version-tabs{display:flex;flex-wrap:wrap;gap:6px;padding:14px 27px 0}
+.version-tabs button{border:1px solid #dce4ed;background:#fff;color:#5b6a7c;border-radius:8px;padding:5px 11px;font-size:11px;font-weight:700}
+.version-tabs button.active{border-color:#8bb7f3;background:#f4f9ff;color:#236add}
+.submitted-spec{margin:0 27px 22px;border:1px solid #eef1f5;border-radius:11px;background:#fbfcfe}
+.submitted-spec summary{padding:10px 14px;font-size:11px;font-weight:700;color:#536176;cursor:pointer}
+.submitted-spec .markdown-body{padding:4px 14px 14px;font-size:12px}
+.result-block{padding:20px 27px 6px}
+.result-summary{margin:0 0 16px;font-size:14px;line-height:1.7;color:#2a3648}
+.loop-terminal{display:flex;flex-direction:column;gap:5px;margin-bottom:16px;padding:12px 14px;border-radius:11px;background:#f1f5fa;border:1px solid #e2e9f1}
+.loop-terminal strong{font-size:12px}
+.loop-terminal span{font-size:11px;color:#6b7a8d}
+.loop-completed{background:#eaf8ef;border-color:#cfeeda}
+.loop-blocked,.loop-failed{background:#fff1ed;border-color:#f6d7d0}
+.loop-budget_exhausted{background:#fff7e8;border-color:#f2e2c2}
+.result-section{margin:0 0 16px}
+.result-section h3{margin:0 0 7px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#3178ee}
+.result-section ul{margin:0;padding-left:18px;font-size:12px;line-height:1.7;color:#344154}
+.result-section li{margin-bottom:4px;overflow-wrap:anywhere}
+.result-section code{font-family:Consolas,"Cascadia Code",monospace;font-size:.92em;background:#f2f5f9;border-radius:4px;padding:1px 4px}
+.result-section.remaining h3{color:#b06a2c}
+.evidence-block{padding:6px 27px 26px}
+.evidence-block h3{margin:0 0 10px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#718096}
+.evidence-rows{display:flex;flex-direction:column;gap:5px}
+.evidence-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:10px;padding:8px 11px;border:1px solid #eef1f5;border-radius:9px;background:#fbfcfe;font-size:11px}
+.evidence-kind{color:#7b899b;font-weight:700;white-space:nowrap}
+.evidence-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#2a3648}
+.evidence-outcome{border-radius:99px;padding:2px 8px;font-weight:700;background:#eef3f9;color:#53687f}
+.evidence-passed .evidence-outcome{background:#eaf8ef;color:#24804d}
+.evidence-failed .evidence-outcome{background:#fff1ed;color:#b04a36}
+.vibe-timeline{padding:4px 27px 8px}
+.vibe-timeline h3{margin:0 0 10px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#718096}
+.vibe-entry{margin-bottom:9px;border:1px solid #eef1f5;border-radius:11px;background:#fbfcfe;overflow:hidden}
+.vibe-entry summary{display:flex;align-items:center;gap:10px;padding:10px 13px;cursor:pointer;font-size:11px;font-weight:700;color:#344258}
+.vibe-outcome{border-radius:99px;padding:2px 8px;background:#eef3f9;color:#53687f}
+.vibe-time{margin-left:auto;font-weight:400;color:#8794a4}
+.vibe-entry-body{display:grid;gap:10px;padding:0 13px 14px}
+.vibe-spec h4,.vibe-output h4{margin:6px 0;font-size:11px;color:#718096}
+.vibe-spec .markdown-body,.vibe-output .markdown-body{padding:0;background:none;font-size:12px}
