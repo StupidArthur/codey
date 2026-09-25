@@ -1,6 +1,10 @@
 /**
- * Temporary phase-2 diagnostic: locate the failing runtime phase without
- * printing credentials or conversation content.
+ * Phase-2 diagnostic probe: locate the failing runtime phase. Like the P0
+ * probe, one Node host process starts two `dsh --profile sdk` runtime
+ * subprocesses in sequence against the same temporary DSH home.
+ *
+ * Prints only phase status, event kinds/counts and JSON-RPC error fields —
+ * never credentials, prompts, model answers or memory tokens.
  */
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -15,22 +19,32 @@ const provider = 'deepseek-official'
 const model = 'deepseek-v4-flash'
 const hasKey = Boolean(process.env.DEEPSEEK_API_KEY)
 const token = `diag-${randomUUID().slice(0, 8)}`
-const out = { hasKey, workspace, dshHome }
+const out = { hasKey, hostProcess: process.pid, workspace, dshHome }
 
 function makeHarness() {
   return new DeepSeekHarness({ profile: 'sdk', cwd: workspace, processCwd: workspace, dshHome, provider, model, initializeTimeoutMs: 60_000 })
 }
 
+function sanitize(text) {
+  return String(text).replace(/[\r\n]+/g, ' ').slice(0, 200)
+}
+
+function describeError(error) {
+  const described = { name: typeof error?.name === 'string' && error.name ? error.name : 'Error' }
+  if (typeof error?.code === 'number') described.code = error.code
+  if (typeof error?.message === 'string') described.message = sanitize(error.message)
+  return described
+}
+
 async function step(name, fn) {
   try {
     const value = await fn()
-    out[name] = { ok: true, detail: value }
+    out[name] = value === undefined ? { ok: true } : { ok: true, detail: value }
   } catch (error) {
-    out[name] = { ok: false, name: error?.name, message: String(error?.message ?? error).slice(0, 200) }
+    out[name] = { ok: false, ...describeError(error) }
   }
 }
 
-let sessionId
 const summarize = (notifications, events) => ({
   methods: [...new Set(notifications.map((n) => n.method))],
   eventTypes: [...new Set(events.map((e) => e?.type))],
@@ -38,38 +52,37 @@ const summarize = (notifications, events) => ({
   assistantEvents: events.filter((e) => e?.type === 'assistant/message').length
 })
 
-await step('process1', async () => {
-  const h = makeHarness()
-  try {
-    await h.start()
-    const handle = h.session()
-    sessionId = handle.id
-    const r1 = await handle.run(`Remember this token: ${token}. Reply with one short sentence.`)
-    const r2 = await handle.run('What token did I ask you to remember? Reply with only that token.')
-    return {
-      sessionIdLength: handle.id.length,
-      r1Chars: r1.finalResponse.length,
-      r2HasToken: r2.finalResponse.includes(token),
-      r1: summarize(r1.notifications, r1.events),
-      r2: summarize(r2.notifications, r2.events)
-    }
-  } finally {
-    await h.close().catch(() => {})
+let h1
+let h2
+let sessionId
+
+await step('subprocess1', async () => {
+  h1 = makeHarness()
+  await h1.start()
+  const handle = h1.session()
+  sessionId = handle.id
+  const r1 = await handle.run(`Remember this token: ${token}. Reply with one short sentence.`)
+  const r2 = await handle.run('What token did I ask you to remember? Reply with only that token.')
+  return {
+    sessionIdLength: handle.id.length,
+    r1Chars: r1.finalResponse.length,
+    r2HasToken: r2.finalResponse.includes(token),
+    r1: summarize(r1.notifications, r1.events),
+    r2: summarize(r2.notifications, r2.events)
   }
 })
+if (h1) await step('subprocess1-close', () => h1.close())
 
 if (hasKey && sessionId) {
-  await step('process2-resume', async () => {
-    const h = makeHarness()
-    try {
-      await h.start()
-      const handle = h.session(sessionId)
-      const r = await handle.run('What token did I ask you to remember before restart? Reply with only that token.')
-      return { rHasToken: r.finalResponse.includes(token), chars: r.finalResponse.length }
-    } finally {
-      await h.close().catch(() => {})
-    }
+  await step('subprocess2-resume', async () => {
+    h2 = makeHarness()
+    await h2.start()
+    const handle = h2.session(sessionId)
+    const r = await handle.run('What token did I ask you to remember before restart? Reply with only that token.')
+    return { rHasToken: r.finalResponse.includes(token), chars: r.finalResponse.length }
   })
+  if (h2) await step('subprocess2-close', () => h2.close())
 }
 
 console.log(JSON.stringify(out, null, 2))
+if (Object.values(out).some((value) => value && typeof value === 'object' && value.ok === false)) process.exitCode = 1

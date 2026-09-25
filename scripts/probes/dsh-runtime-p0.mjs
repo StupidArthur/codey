@@ -3,9 +3,13 @@
  *   node scripts/probes/dsh-runtime-p0.mjs
  *   DEEPSEEK_API_KEY=... node scripts/probes/dsh-runtime-p0.mjs
  *
- * A credential enables prompt, sequential prompt and cross-process resume.
- * The script prints only phase status, session id, event counts and sanitized
- * assertions â€?never content, tokens or keys.
+ * One Node host process runs the whole probe. It creates two DeepSeekHarness
+ * instances in sequence; each harness starts its own `dsh --profile sdk`
+ * runtime subprocess pointing at the same temporary DSH home. The second
+ * harness is the cross-process (new runtime subprocess) resume attempt.
+ *
+ * Prints only phase status, session id, event kinds/counts, JSON-RPC error
+ * fields and sanitized assertions â€” never content, memory tokens or keys.
  *
  * Exit codes: 0 = all phases passed; 1 = a phase failed; 2 = skipped (no credential).
  */
@@ -23,6 +27,7 @@ const model = process.env.P0_MODEL ?? 'deepseek-v4-flash'
 const hasCredential = Boolean(process.env.DEEPSEEK_API_KEY)
 const phases = []
 let sessionId
+let fatal = false
 const memoryToken = `p0-${randomUUID().slice(0, 8)}`
 
 function makeHarness() {
@@ -31,6 +36,19 @@ function makeHarness() {
     dshHome, provider, model,
     initializeTimeoutMs: 60_000
   })
+}
+
+/** Truncated, whitespace-flattened error message; never contains credentials. */
+function sanitize(text) {
+  return String(text).replace(/[\r\n]+/g, ' ').slice(0, 200)
+}
+
+/** Record only the fields the thrown error actually exposes. */
+function describeError(error) {
+  const described = { name: typeof error?.name === 'string' && error.name ? error.name : 'Error' }
+  if (typeof error?.code === 'number') described.code = error.code
+  if (typeof error?.message === 'string') described.message = sanitize(error.message)
+  return described
 }
 
 function summarize(notifications, events) {
@@ -58,15 +76,22 @@ async function recordPhase(name, result) {
   return row
 }
 
-let fatal = false
-let firstStatus = 'not-run'
+/** A close phase is only `passed: true` when close() actually resolved. */
+async function recordClose(harness, phaseName) {
+  try {
+    await harness.close()
+    phases.push({ phase: phaseName, passed: true })
+  } catch (error) {
+    phases.push({ phase: phaseName, passed: false, ...describeError(error) })
+    fatal = true
+  }
+}
 
-// --- process 1: initialize, first prompt, sequential prompt ---
+// --- runtime subprocess 1: initialize, first prompt, sequential prompt ---
 const first = makeHarness()
 try {
   await first.start()
   phases.push({ phase: 'initialize', passed: true })
-  firstStatus = 'passed'
   if (hasCredential) {
     const handle = first.session()
     sessionId = handle.id
@@ -78,15 +103,13 @@ try {
     if (!firstRow.passed) fatal = true
   }
 } catch (error) {
-  firstStatus = 'failed'
   fatal = true
-  phases.push({ phase: 'process1', passed: false, error: String(error?.message ?? error).slice(0, 200) })
+  phases.push({ phase: 'subprocess1', passed: false, ...describeError(error) })
 } finally {
-  await first.close().catch(() => {})
-  phases.push({ phase: 'first-close', passed: true })
+  await recordClose(first, 'first-close')
 }
 
-// --- process 2: resume after restart ---
+// --- runtime subprocess 2: resume after the runtime subprocess was replaced ---
 if (hasCredential && sessionId && !fatal) {
   const second = makeHarness()
   try {
@@ -96,10 +119,10 @@ if (hasCredential && sessionId && !fatal) {
     const row = await recordPhase('resume-after-restart', resumedResult)
     phases.push({ phase: 'resume-context-inherited', passed: row.passed && resumedResult.finalResponse.includes(memoryToken) })
   } catch (error) {
-    phases.push({ phase: 'resume-after-restart', passed: false, error: String(error?.message ?? error).slice(0, 200) })
+    phases.push({ phase: 'resume-after-restart', passed: false, ...describeError(error) })
     fatal = true
   } finally {
-    await second.close().catch(() => {})
+    await recordClose(second, 'second-close')
   }
 }
 
@@ -108,6 +131,6 @@ if (!hasCredential) {
   console.log(JSON.stringify({ status: 'partial', reason: 'DEEPSEEK_API_KEY is absent; prompt and resume probes skipped', workspacePath, dshHome, phases }, null, 2))
   process.exitCode = 2
 } else {
-  console.log(JSON.stringify({ status: failed ? 'failed' : 'passed', workspacePath, dshHome, sessionId, firstStatus, phases }, null, 2))
+  console.log(JSON.stringify({ status: failed ? 'failed' : 'passed', workspacePath, dshHome, sessionId, phases }, null, 2))
   process.exitCode = failed ? 1 : 0
 }

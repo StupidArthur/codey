@@ -2,94 +2,94 @@
 
 Status: **blocking** for any client that must continue an existing session.
 Reported: 2026-09-25
-Target versions: `@deepseek-ai/dsh@0.1.7-rc.2`, `@deepseek-ai/dsh-sdk-client@0.1.7-rc.2`
-Environment: Windows, Node `v24.12.0`; provider `deepseek-official`, model `deepseek-v4-flash`, valid `DEEPSEEK_API_KEY`.
+
+Target versions (installed in the reproduction environment):
+
+| package | version |
+| --- | --- |
+| `@deepseek-ai/dsh` | `0.1.7-rc.2` |
+| `@deepseek-ai/dsh-sdk-client` | `0.1.7-rc.2` |
+| `@deepseek-ai/dsh-sdk-jsonrpc-server` | `0.1.7-rc.2` |
+| `@deepseek-ai/dsh-agent` | `0.1.7-rc.2` |
+| `@deepseek-ai/dsh-sdk-protocol` (resolved peer) | `0.1.0-rc.8` |
+
+Environment: Windows, Node `v24.12.0`; provider `deepseek-official`, model `deepseek-v4-flash`, a valid `DEEPSEEK_API_KEY`.
+
+Terminology used below: the probe is **one Node host process**; a `DeepSeekHarness` starts its own **`dsh --profile sdk` runtime subprocess**. “Resume after restart” means a second runtime subprocess (started by a second `DeepSeekHarness` in the same host process) reading the same DSH home.
 
 ## Summary
 
-After the SDK runtime subprocess is closed and a **new process** opens the same DSH home, `DeepSeekHarness.session(existingId).run(...)` fails with:
+When a second SDK runtime subprocess opens the same DSH home and the client calls `DeepSeekHarness.session(existingId).run(...)`, the call rejects with a JSON-RPC error:
 
-```
-JsonRpcResponseError: session "session-<id>" already exists
-code: -32603
-```
+- name: `JsonRpcResponseError`
+- code: `-32603`
+- message: `session "<id>" already exists`
 
-The stored session is found (that is why `create` collides), but the runtime never re-attaches to it. The SDK wire exposes only `initialize`, `session/prompt`, and `shutdown`; the `sdk` profile server only calls `ctx.agents.create(...)` and never `ctx.agents.resume(...)`. As a result there is no public way, through the SDK, to continue a persisted session across process restarts.
+The SDK wire request map contains only `initialize`, `session/prompt`, and `shutdown`. The `sdk` profile server always routes a prompt through `ctx.agents.create(...)` and never `ctx.agents.resume(...)`. Because the SDK runtime keeps live sessions in an in-process map, a fresh runtime subprocess treats a persisted id as a new session and calls `create`. That call collides with the session already persisted at that id (persistence inferred from the collision; see Evidence provenance).
 
-This blocks:
-
-- resuming a session after an application restart;
-- continuing a session that was originally created by another profile (for example the public ACP profile).
+Effect: there is no public SDK path to continue an already-persisted session in a new runtime subprocess.
 
 ## Reproduction
-
-Probe in this repository (prints only phase status, ids, event kinds and counts — no content or credentials):
 
 ```text
 DEEPSEEK_API_KEY=... node scripts/probes/dsh-runtime-p0.mjs
 ```
 
-Observed (structured output, `status: "failed"`, exit code 1):
+Observed (sanitized structured output; `status: "failed"`, exit code 1). Verbatim phase rows:
 
-| phase | result | notes |
+| phase | result | recorded fields |
 | --- | --- | --- |
 | `initialize` | passed | |
-| `first-prompt` | passed | assistant event + idle observed |
-| `sequential-prompt` | passed | second prompt in the **same** process inherits the first context |
-| `resume-after-restart` | **failed** | `session "<id>" already exists` |
-| `first-close` | passed | subprocess reaped |
+| `first-prompt` | passed | `responseCharacters: 55`, `idleObserved: true`, `assistantEvents: 1` |
+| `sequential-prompt` | passed | `responseCharacters: 11`, `idleObserved: true`, `assistantEvents: 1` |
+| `sequential-context-inherited` | passed | second prompt in the **same runtime subprocess** recalled the token |
+| `first-close` | passed | `close()` resolved |
+| `resume-after-restart` | **failed** | `name: "JsonRpcResponseError"`, `code: -32603`, `message: "session \"session-<id>\" already exists"` |
+| `second-close` | passed | `close()` resolved |
 
-Minimal sequence:
+`first-close`/`second-close` are reported `passed: true` only after `close()` actually resolves; a rejected `close()` records `passed: false` with the error fields and fails the run. The error fields are read from the thrown error (`JsonRpcResponseError.code` is `number | undefined`); `-32603` is what that run observed, not a hardcoded value.
 
-1. Process A: `new DeepSeekHarness({ profile:'sdk', dshHome, cwd, provider, model })`, `start()`, `session()` (mints `session-<uuid>`), `run("Remember this token: X …")`, `close()`.
-2. Process B: same `dshHome`/`cwd`, `start()`, `session(sameId).run("What token did I ask you to remember?")`.
+A shorter diagnostic with per-phase isolation and the same close/error semantics is `scripts/probes/dsh-runtime-diag.mjs`:
+
+```text
+hasKey: true
+subprocess1: ok
+subprocess1-close: ok
+subprocess2-resume: { ok: false, name: "JsonRpcResponseError", code: -32603, message: "session \"session-<id>\" already exists" }
+subprocess2-close: ok
+```
+
+Minimal sequence (same host process, two runtime subprocesses):
+
+1. Runtime subprocess 1: `new DeepSeekHarness({ profile:'sdk', dshHome, cwd, provider, model })`, `start()`, `session()` (mints `session-<uuid>`), `run("Remember this token: X …")`, `close()`.
+2. Runtime subprocess 2: same `dshHome`/`cwd`, `start()`, `session(sameId).run("What token did I ask you to remember?")`.
    - Expected: the answer contains `X` (context restored).
-   - Actual: JSON-RPC error `session "<id>" already exists`.
+   - Actual: the JSON-RPC error above.
 
-A shorter diagnostic with per-phase isolation is in `scripts/probes/dsh-runtime-diag.mjs`.
+## Root cause (public source)
 
-## Root cause (public code)
+Directly proven by the public source of the installed versions:
 
-In `@deepseek-ai/dsh-sdk-jsonrpc-server` (`lib/index.js`), the request handler is:
+1. The wire surface has no resume request. `@deepseek-ai/dsh-sdk-protocol@0.1.0-rc.8`, `lib/types/types.d.ts`, `HarnessSdkRequestMap` lists exactly:
+   ```ts
+   'initialize' | 'session/prompt' | 'shutdown'
+   ```
+2. The `sdk` profile server always creates. `@deepseek-ai/dsh-sdk-jsonrpc-server@0.1.7-rc.2`, `lib/index.js`, class `HarnessSdkJsonRpcServer`:
+   - `handleRequest` switches only on `initialize`, `session/prompt`, `shutdown`;
+   - `prompt` → `getOrCreateSession(sessionId)`;
+   - `getOrCreateSession` consults the in-process `this.sessions` map only, then calls `createSession`;
+   - `createSession` calls `this.ctx.agents.create({ sessionId, meta: { cwd: this.cwd }, agentOptions })`. There is no `agents.resume` call.
+3. A resume path does exist one layer down. `@deepseek-ai/dsh-agent@0.1.7-rc.2`, `lib/index.js`, the `agents` service (`AgentRegistry`) defines both `create(options)` and `resume(options)`—the latter documented as “Load a persisted session and resume an agent on it”.
 
-```js
-async prompt(params) {
-  const rec = await this.getOrCreateSession(params.sessionId);
-  ...
-}
-async getOrCreateSession(sessionId) {
-  const existing = this.sessions.get(sessionId);   // in-memory only
-  if (existing) return existing;
-  ...
-  return this.createSession(sessionId);
-}
-async createSession(sessionId) {
-  const rec = { handle: await this.ctx.agents.create({
-    sessionId: brandString(sessionId),
-    meta: { cwd: this.cwd },
-    agentOptions: { ... }
-  }) };
-  this.sessions.set(sessionId, rec);
-  return rec;
-}
-```
-
-`this.sessions` is an in-process map. On a fresh process it is empty, so a persisted id always goes to `agents.create`. `agents.create` throws `session "<id>" already exists` when the id is already present in the session store. `ctx.agents` does expose a separate `resume(options)` entry point (see `@deepseek-ai/dsh-agent`, `AgentsService.resume`), but the SDK server never calls it, and the SDK wire has no resume request.
-
-`handleRequest` accepts only:
-
-```js
-case "initialize": ...
-case "session/prompt": ...
-case "shutdown": ...
-```
+Inferred from behavior (not directly inspected): the colliding id is present in the persisted session store, which is why `agents.create` rejects. We did not read DSH private storage or JSONL; we infer persistence from the collision message and from the ACP behaviour below.
 
 ## Comparison: the public ACP profile does resume
 
-The shipped ACP profile exposes `session/resume`, and it restores context across processes.
+The shipped ACP profile exposes `session/resume` and restores context across runtime subprocesses. The ACP probe is also one Node host process starting two `dsh --profile acp` subprocesses in sequence against the same DSH home:
 
-Probe: `DEEPSEEK_API_KEY=... node scripts/probes/dsh-acp-resume.mjs`
-
+```text
+DEEPSEEK_API_KEY=... node scripts/probes/dsh-acp-resume.mjs
+```
 ```json
 {
   "create": { "stopReason": "end_turn", "chunkChars": 44 },
@@ -98,13 +98,20 @@ Probe: `DEEPSEEK_API_KEY=... node scripts/probes/dsh-acp-resume.mjs`
 }
 ```
 
-So the persistence layer supports it; only the **SDK transport** lacks the operation. `session/list(cwd)` from the same ACP profile also returns persisted, resumable sessions (verified separately in `scripts/probes/dsh-acp-discovery.mjs`, including cursor pagination).
+So resume is supported by the persistence/agent layer and by the ACP transport; only the **SDK transport** lacks the operation. `session/list(cwd)` from the ACP profile also returns persisted sessions (verified in `scripts/probes/dsh-acp-discovery.mjs`, including cursor pagination).
+
+## Evidence provenance
+
+- **Proven by the probes above**: the failure phase, `JsonRpcResponseError`, code `-32603`, its message, and that `close()` resolved for both runtime subprocesses.
+- **Proven by public source**: the SDK request map has only three methods; the `sdk` server calls `agents.create` and never `agents.resume`; `agents.resume` exists.
+- **Inferred**: the exact persistence mechanism that makes the id “already exist”. Not inspected.
+- **Not tested / not claimed**: cross-profile resume equivalence (an id created by the `acp` profile being resumed by the `sdk` profile). This report does not claim that is verified.
 
 ## Questions / requests
 
 1. Is resuming a persisted session intentionally unsupported in the SDK wire for `0.1.7-rc.2`, or is this a gap? If supported, what is the correct public call?
-2. If unsupported: please add a resume request to the SDK wire (or make `session/prompt` re-attach when the id already exists in persistence, using `agents.resume`) so that `DeepSeekHarness.session(existingId).run(...)` continues the existing context in a new process.
+2. If unsupported: please add a resume request to the SDK wire, or make `session/prompt` re-attach (via `agents.resume`) when the id already exists in persistence, so `DeepSeekHarness.session(existingId).run(...)` continues the existing context in a new runtime subprocess.
 3. If neither is planned for this version: is routing existing-session execution through the public ACP `session/resume` + `session/prompt` the recommended interim path, while the SDK is used only for newly created sessions?
-4. Can you confirm whether an id created under one profile (e.g. `acp`) is fully equivalent for resume under another (`sdk`) once the resume gap is closed? Both profiles share the single DSH home (`$DSH_HOME` → `~/.dsh`), but we have not been able to test cross-profile resume end to end.
+4. Can you confirm whether an id created under one profile (e.g. `acp`) is fully equivalent for resume under another (`sdk`)? Both profiles share the single DSH home (`$DSH_HOME` → `~/.dsh`), but we have not been able to test cross-profile resume end to end.
 
 We are not reading DSH private storage and are not parsing JSONL; we would like to stay on a public interface.

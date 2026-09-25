@@ -81,10 +81,12 @@ $env:ELECTRON_RUN_AS_NODE='1'; & (node -e "console.log(require('electron'))") sc
 | 阶段 | 结果 | 关键断言 |
 | --- | --- | --- |
 | `initialize` | 通过 | — |
-| `first-prompt` | 通过 | 响应 46 字符、`assistant/message` 1 个、idle 通知 |
+| `first-prompt` | 通过 | 响应 55 字符、`assistant/message` 1 个、idle 通知 |
 | `sequential-prompt` | 通过 | 同进程第二次 prompt 取回前一次标记（`sequential-context-inherited: true`） |
-| `resume-after-restart` | **失败** | `session "<id>" already exists` |
-| `first-close`（子进程回收） | 通过 | — |
+| `first-close` / `second-close` | 通过 | `close()` 真实 resolve；探针只在 resolve 后记 `passed: true`，失败会记录错误并使总状态失败 |
+| `resume-after-restart` | **失败** | `name: "JsonRpcResponseError"`、`code: -32603`、`message: "session \"<id>\" already exists"`（字段由探针从抛出的错误读取，非硬编码） |
+
+一次运行的实测输出（脱敏，退出码 1）：`code` 与 `message` 由 `dsh-runtime-p0.mjs` 直接记录；`first-close`、`second-close` 均为 `passed: true`，即两次 `close()` 都实际成功。诊断探针 `dsh-runtime-diag.mjs` 输出同样字段并在失败时退出码 1。
 
 **根因（公开代码可复核）**：`@deepseek-ai/dsh-sdk-jsonrpc-server` 的 `prompt` 对每个 sessionId 都调用 `ctx.agents.create({ sessionId, meta })`，从不调用 `ctx.agents.resume(...)`。Session 已持久化时 `agents.create` 抛 `already exists`。SDK wire 只有 `initialize` / `session/prompt` / `shutdown`，没有 resume 方法。
 
@@ -100,7 +102,7 @@ $env:ELECTRON_RUN_AS_NODE='1'; & (node -e "console.log(require('electron'))") sc
 
 因为「第一次 Codey 提交沿用原 DSH 上下文」和「重启恢复」都依赖 resume，**本阶段未通过**。`DshRuntime` 现有的按 ID 提交路径对已存在 Session 只会触发上述错误；需架构决策：改走公开 ACP `session/resume` 执行，或等待上游为 SDK wire 增加 resume。
 
-未验证：resume 失败时的错误事件类型（探针按结构化错误返回，未深挖运行时内部日志）；cwd 不匹配的失败语义。
+未验证：运行时内部为何在该 id 上走 `create` 分支（探针只观测 JSON-RPC 层错误，不解析私有存储）；cwd 不匹配的失败语义；跨 profile resume 等价性（未测，不作声明）。
 
 ---
 
@@ -128,8 +130,8 @@ $env:ELECTRON_RUN_AS_NODE='1'; & (node -e "console.log(require('electron'))") sc
 - `scripts/probes/dsh-session-discovery-impl.mjs`（新增）
 - `scripts/probes/dsh-session-merge.mjs`（新增）
 - `scripts/probes/dsh-discovery-persistence.mjs`（新增）
-- `scripts/probes/dsh-runtime-p0.mjs`（改为结构化阶段报告与退出码）
-- `scripts/probes/dsh-runtime-diag.mjs`（新增，失败定位）
+- `scripts/probes/dsh-runtime-p0.mjs`（结构化阶段报告、真实 close 状态、JSON-RPC 错误字段、退出码）
+- `scripts/probes/dsh-runtime-diag.mjs`（新增，失败定位；同样记录真实 close 状态与错误字段，失败退出码 1）
 - `scripts/probes/dsh-acp-resume.mjs`（新增，ACP resume 对照）
 - `docs/dsh-integration-status.md`、`docs/architecture-review.md`、`requirement/dsh-final-system-design.md`（同步 V1 决策与阶段 2 结论）
 - `docs/dsh-upstream-resume-report.md`（面向上游的 resume 缺陷报告）
