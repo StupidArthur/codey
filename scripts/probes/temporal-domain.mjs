@@ -2,7 +2,8 @@
  * Phase B/C/D automated acceptance probe: product domain invariants, evidence
  * cross-check, Result composition, Loop state machine and cross-process leases.
  *
- * Run under Electron's Node (better-sqlite3 is Electron ABI):
+ * Run under Electron's Node (`node:sqlite` is only available in Electron's
+ * bundled Node, not the system Node):
  *   $env:ELECTRON_RUN_AS_NODE=1
  *   .\node_modules\electron\dist\electron.exe scripts/probes/temporal-domain.mjs
  *
@@ -31,8 +32,8 @@ async function bundle(entry, outfile, external = []) {
 
 const storePath = join(here, '.cache-domain-store.cjs')
 const enginePath = join(here, '.cache-domain-engine.cjs')
-const { ProductStore } = await bundle('src/main/persistence/ProductStore.ts', storePath, ['better-sqlite3'])
-const { RoundEngine } = await bundle('src/main/rounds/RoundEngine.ts', enginePath, ['better-sqlite3'])
+const { ProductStore } = await bundle('src/main/persistence/ProductStore.ts', storePath)
+const { RoundEngine } = await bundle('src/main/rounds/RoundEngine.ts', enginePath)
 const { EvidenceCollector } = await bundle('src/main/evidence/EvidenceCollector.ts', join(here, '.cache-domain-evidence.cjs'))
 const { ResultBuilder } = await bundle('src/main/result/ResultBuilder.ts', join(here, '.cache-domain-result.cjs'))
 const { LoopController, DEFAULT_LOOP_BUDGET } = await bundle('src/main/loop/LoopController.ts', join(here, '.cache-domain-loop.cjs'))

@@ -20,7 +20,7 @@ async function bundle(entry, outfile, external) {
   return require(outfile)
 }
 
-const { ProductStore } = await bundle('src/main/persistence/ProductStore.ts', join(here, '.cache-product-store.cjs'), ['better-sqlite3'])
+const { ProductStore } = await bundle('src/main/persistence/ProductStore.ts', join(here, '.cache-product-store.cjs'), [])
 const { mergeSessions } = await bundle('src/main/dsh/sessionMerge.ts', join(here, '.cache-session-merge.cjs'), [])
 
 const root = await mkdtemp(join(tmpdir(), 'temporal-persist-'))

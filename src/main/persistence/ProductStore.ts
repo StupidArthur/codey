@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
-import Database from 'better-sqlite3'
+import { DatabaseSync, type StatementSync } from 'node:sqlite'
 import type { ModelSettings, RoundDetail, RoundMode, RoundSummary, SessionSummary } from '../../shared/contracts'
 
 type SessionRow = {
@@ -176,33 +176,78 @@ const migrations = [
 
 /** Product projection only. DSH remains authoritative for its conversation and runtime state. */
 export class ProductStore {
-  private readonly db: Database.Database
+  private readonly db: DatabaseSync
   private readonly leases = new Set<SessionLease>()
+  private readonly statements = new Map<string, StatementSync>()
+  private transactionDepth = 0
 
   constructor(dbPath: string) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true })
-    this.db = new Database(dbPath)
-    this.db.pragma('foreign_keys = ON')
-    this.db.pragma('busy_timeout = 5000')
-    if (dbPath !== ':memory:') this.db.pragma('journal_mode = WAL')
+    this.db = new DatabaseSync(dbPath)
+    this.db.exec('PRAGMA foreign_keys = ON')
+    this.db.exec('PRAGMA busy_timeout = 5000')
+    if (dbPath !== ':memory:') this.db.exec('PRAGMA journal_mode = WAL')
     this.migrate()
   }
 
+  /**
+   * Prepared statements are cached and kept alive for the lifetime of the
+   * store. Creating hundreds of short-lived statements (one per snapshot
+   * projection) while a DSH turn streamed events caused GC to finalize the
+   * native Statement handles mid-turn, which aborted the Electron main process.
+   */
+  private stmt(sql: string): StatementSync {
+    let statement = this.statements.get(sql)
+    if (!statement) {
+      statement = this.db.prepare(sql)
+      this.statements.set(sql, statement)
+    }
+    return statement
+  }
+
+  /**
+   * BEGIN/COMMIT/ROLLBACK with savepoint nesting. Kept local so the store does
+   * not depend on driver-specific transaction helpers; nested calls reuse a
+   * savepoint like the previous driver did.
+   */
+  private transaction<T>(fn: () => T): T {
+    const nested = this.transactionDepth > 0
+    this.db.exec(nested ? 'SAVEPOINT temporal_nested' : 'BEGIN')
+    this.transactionDepth += 1
+    try {
+      const result = fn()
+      this.db.exec(nested ? 'RELEASE temporal_nested' : 'COMMIT')
+      return result
+    } catch (error) {
+      if (nested) {
+        try {
+          this.db.exec('ROLLBACK TO temporal_nested')
+          this.db.exec('RELEASE temporal_nested')
+        } catch { /* savepoint already gone */ }
+      } else {
+        try { this.db.exec('ROLLBACK') } catch { /* transaction already gone */ }
+      }
+      throw error
+    } finally {
+      this.transactionDepth -= 1
+    }
+  }
+
   private migrate(): void {
-    const version = this.db.pragma('user_version', { simple: true }) as number
+    const version = (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
     if (version > migrations.length) {
       throw new Error(`Product database version ${version} is newer than this app supports`)
     }
     for (let index = version; index < migrations.length; index += 1) {
-      this.db.transaction(() => {
+      this.transaction(() => {
         this.db.exec(migrations[index])
-        this.db.pragma(`user_version = ${index + 1}`)
-      })()
+        this.db.exec(`PRAGMA user_version = ${index + 1}`)
+      })
     }
   }
 
   listSessions(workspacePath: string): SessionSummary[] {
-    const rows = this.db.prepare(`
+    const rows = this.stmt(`
       SELECT s.*, EXISTS(SELECT 1 FROM rounds r WHERE r.product_session_id = s.id) AS has_temporal_history
       FROM product_sessions s WHERE s.workspace_path = ? ORDER BY s.updated_at DESC
     `).all(workspacePath) as SessionRow[]
@@ -210,7 +255,7 @@ export class ProductStore {
   }
 
   getSession(id: string): SessionSummary | undefined {
-    const row = this.db.prepare(`
+    const row = this.stmt(`
       SELECT s.*, EXISTS(SELECT 1 FROM rounds r WHERE r.product_session_id = s.id) AS has_temporal_history
       FROM product_sessions s WHERE s.id = ?
     `).get(id) as SessionRow | undefined
@@ -218,7 +263,7 @@ export class ProductStore {
   }
 
   getSessionByDshId(dshSessionId: string): SessionSummary | undefined {
-    const row = this.db.prepare(`
+    const row = this.stmt(`
       SELECT s.*, EXISTS(SELECT 1 FROM rounds r WHERE r.product_session_id = s.id) AS has_temporal_history
       FROM product_sessions s WHERE s.dsh_session_id = ?
     `).get(dshSessionId) as SessionRow | undefined
@@ -237,7 +282,7 @@ export class ProductStore {
     }
     const id = randomUUID()
     const now = new Date().toISOString()
-    this.db.prepare(`
+    this.stmt(`
       INSERT INTO product_sessions(id, dsh_session_id, workspace_path, title, created_at, updated_at, permission)
       VALUES (?, ?, ?, ?, ?, ?, 'workspace-write')
     `).run(id, dshSessionId ?? null, workspacePath, title?.trim() || 'New Session', now, now)
@@ -250,20 +295,20 @@ export class ProductStore {
     if (current.workspacePath !== session.workspacePath) {
       throw new Error('A product session cannot change workspace')
     }
-    this.db.prepare(`
+    this.stmt(`
       UPDATE product_sessions SET title = ?, dsh_session_id = COALESCE(?, dsh_session_id), updated_at = ?
       WHERE id = ?
     `).run(session.title, session.dshSessionId ?? null, new Date().toISOString(), session.id)
   }
 
   getDshSessionId(productSessionId: string): string | undefined {
-    const row = this.db.prepare('SELECT dsh_session_id FROM product_sessions WHERE id = ?')
+    const row = this.stmt('SELECT dsh_session_id FROM product_sessions WHERE id = ?')
       .get(productSessionId) as { dsh_session_id: string | null } | undefined
     return row?.dsh_session_id ?? undefined
   }
 
   setDshSessionId(productSessionId: string, dshSessionId: string): void {
-    const changed = this.db.prepare(`
+    const changed = this.stmt(`
       UPDATE product_sessions SET dsh_session_id = ?, updated_at = ?
       WHERE id = ? AND (dsh_session_id IS NULL OR dsh_session_id = ?)
     `).run(dshSessionId, new Date().toISOString(), productSessionId, dshSessionId)
@@ -271,14 +316,14 @@ export class ProductStore {
   }
 
   getPermission(productSessionId: string): SessionSummary['permission'] {
-    const row = this.db.prepare('SELECT permission FROM product_sessions WHERE id = ?')
+    const row = this.stmt('SELECT permission FROM product_sessions WHERE id = ?')
       .get(productSessionId) as { permission: SessionSummary['permission'] } | undefined
     if (!row) throw new Error(`Unknown product session: ${productSessionId}`)
     return row.permission
   }
 
   setPermission(productSessionId: string, permission: SessionSummary['permission']): void {
-    const changed = this.db.prepare('UPDATE product_sessions SET permission = ?, updated_at = ? WHERE id = ?')
+    const changed = this.stmt('UPDATE product_sessions SET permission = ?, updated_at = ? WHERE id = ?')
       .run(permission, new Date().toISOString(), productSessionId)
     if (changed.changes !== 1) throw new Error(`Unknown product session: ${productSessionId}`)
   }
@@ -302,7 +347,7 @@ export class ProductStore {
   }
 
   listRounds(sessionId: string): RoundSummary[] {
-    const rows = this.db.prepare(`
+    const rows = this.stmt(`
       SELECT id, sequence, mode, status, title, updated_at, body_markdown
       FROM rounds WHERE product_session_id = ? ORDER BY sequence ASC
     `).all(sessionId) as RoundRow[]
@@ -318,9 +363,9 @@ export class ProductStore {
   }
 
   saveRound(sessionId: string, round: RoundSummary): void {
-    this.db.transaction(() => {
+    this.transaction(() => {
       const now = new Date().toISOString()
-      const saved = this.db.prepare(`
+      const saved = this.stmt(`
         INSERT INTO rounds(id, product_session_id, sequence, mode, status, title, body_markdown, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
@@ -336,15 +381,15 @@ export class ProductStore {
       if (saved.changes !== 1) {
         throw new Error('Round identity, sequence, or mode cannot change')
       }
-      this.db.prepare('UPDATE product_sessions SET updated_at = ? WHERE id = ?')
+      this.stmt('UPDATE product_sessions SET updated_at = ? WHERE id = ?')
         .run(now, sessionId)
-    })()
+    })
   }
 
   /** Commit a mode boundary and its next Round as a single database transition. */
   transitionRound(sessionId: string, currentRoundId: string, next: RoundSummary): void {
-    this.db.transaction(() => {
-      const current = this.db.prepare(`
+    this.transaction(() => {
+      const current = this.stmt(`
         SELECT sequence, mode, status FROM rounds WHERE id = ? AND product_session_id = ?
       `).get(currentRoundId, sessionId) as { sequence: number; mode: RoundMode; status: string } | undefined
       if (!current || current.status !== 'active') throw new Error('No active Round to transition')
@@ -352,16 +397,16 @@ export class ProductStore {
         throw new Error('Mode transition requires a different mode and consecutive sequence')
       }
       const now = new Date().toISOString()
-      this.db.prepare(`
+      this.stmt(`
         UPDATE rounds SET status = 'completed', runtime_active = 0, closed_at = ?, updated_at = ?
         WHERE id = ? AND product_session_id = ?
       `).run(now, now, currentRoundId, sessionId)
       this.saveRound(sessionId, next)
-    })()
+    })
   }
 
   markRoundExecutionStarted(sessionId: string, roundId: string): void {
-    const result = this.db.prepare(`
+    const result = this.stmt(`
       UPDATE rounds SET runtime_active = 1, updated_at = ?
       WHERE id = ? AND product_session_id = ? AND status = 'active' AND runtime_active = 0
     `).run(new Date().toISOString(), roundId, sessionId)
@@ -371,7 +416,7 @@ export class ProductStore {
   markRoundExecutionFinished(sessionId: string, roundId: string, status: RoundSummary['status']): void {
     const now = new Date().toISOString()
     const terminal = status !== 'active'
-    const result = this.db.prepare(`
+    const result = this.stmt(`
       UPDATE rounds SET runtime_active = 0, status = ?, closed_at = CASE WHEN ? THEN ? ELSE closed_at END, updated_at = ?
       WHERE id = ? AND product_session_id = ? AND status = 'active' AND runtime_active = 1
     `).run(status, terminal ? 1 : 0, now, now, roundId, sessionId)
@@ -381,27 +426,27 @@ export class ProductStore {
   /** Called after restart, before restoring a Session projection. Idle Plan/Vibe Rounds remain active. */
   reconcileInterruptedRounds(sessionId: string): number {
     const now = new Date().toISOString()
-    const result = this.db.prepare(`
+    const result = this.stmt(`
       UPDATE rounds SET status = 'interrupted', runtime_active = 0, closed_at = ?, updated_at = ?
       WHERE product_session_id = ? AND status = 'active' AND runtime_active = 1
     `).run(now, now, sessionId)
-    return result.changes
+    return Number(result.changes)
   }
 
   appendPlanVersion(roundId: string, version: PlanVersion): void {
-    this.db.transaction(() => {
+    this.transaction(() => {
       this.requireRoundMode(roundId, 'plan')
       const ordinal = this.nextOrdinal('plan_versions', roundId)
-      this.db.prepare(`
+      this.stmt(`
         INSERT INTO plan_versions(id, round_id, ordinal, submitted_spec, plan_markdown, created_at, dsh_activity_ref)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(version.id, roundId, ordinal, version.submittedSpec, version.planMarkdown,
         version.createdAt, version.dshActivityRef ?? null)
-    })()
+    })
   }
 
   listPlanVersions(roundId: string): PlanVersion[] {
-    const rows = this.db.prepare(`
+    const rows = this.stmt(`
       SELECT id, submitted_spec, plan_markdown, created_at, dsh_activity_ref
       FROM plan_versions WHERE round_id = ? ORDER BY ordinal
     `).all(roundId) as Array<{ id: string; submitted_spec: string; plan_markdown: string; created_at: string; dsh_activity_ref: string | null }>
@@ -411,19 +456,19 @@ export class ProductStore {
   }
 
   appendVibeEntry(roundId: string, entry: VibeEntry): void {
-    this.db.transaction(() => {
+    this.transaction(() => {
       this.requireRoundMode(roundId, 'vibe')
       const ordinal = this.nextOrdinal('vibe_entries', roundId)
-      this.db.prepare(`
+      this.stmt(`
         INSERT INTO vibe_entries(id, round_id, ordinal, spec_markdown, assistant_output, execution_outcome, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(entry.id, roundId, ordinal, entry.specMarkdown, entry.assistantOutput,
         entry.executionOutcome, entry.createdAt)
-    })()
+    })
   }
 
   listVibeEntries(roundId: string): VibeEntry[] {
-    const rows = this.db.prepare(`
+    const rows = this.stmt(`
       SELECT id, spec_markdown, assistant_output, execution_outcome, created_at
       FROM vibe_entries WHERE round_id = ? ORDER BY ordinal
     `).all(roundId) as Array<{ id: string; spec_markdown: string; assistant_output: string; execution_outcome: VibeEntry['executionOutcome']; created_at: string }>
@@ -433,18 +478,18 @@ export class ProductStore {
   }
 
   saveEvidence(roundId: string, evidence: EvidenceRecord): void {
-    this.db.prepare(`
+    this.stmt(`
       INSERT INTO round_evidence(id, round_id, kind, label, detail, outcome, provenance, observed_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET label = excluded.label, detail = excluded.detail,
-        outcome = excluded.outcome, provenance = excluded.provenance, observed_at = excluded.observed_at
-      WHERE round_evidence.round_id = excluded.round_id
+      ON CONFLICT(id) DO UPDATE SET round_id = excluded.round_id, label = excluded.label,
+        detail = excluded.detail, outcome = excluded.outcome, provenance = excluded.provenance,
+        observed_at = excluded.observed_at
     `).run(evidence.id, roundId, evidence.kind, evidence.label, evidence.detail,
       evidence.outcome, evidence.provenance, evidence.observedAt)
   }
 
   listEvidence(roundId: string): EvidenceRecord[] {
-    const rows = this.db.prepare(`
+    const rows = this.stmt(`
       SELECT id, kind, label, detail, outcome, provenance, observed_at
       FROM round_evidence WHERE round_id = ? ORDER BY observed_at, id
     `).all(roundId) as Array<{ id: string; kind: EvidenceRecord['kind']; label: string; detail: string;
@@ -456,7 +501,7 @@ export class ProductStore {
 
   saveResult(roundId: string, document: ResultDocument): void {
     const now = new Date().toISOString()
-    this.db.prepare(`
+    this.stmt(`
       INSERT INTO round_results(round_id, document_json, created_at, updated_at)
       VALUES (?, ?, ?, ?)
       ON CONFLICT(round_id) DO UPDATE SET document_json = excluded.document_json,
@@ -465,7 +510,7 @@ export class ProductStore {
   }
 
   getResult(roundId: string): ResultDocument | undefined {
-    const row = this.db.prepare('SELECT document_json FROM round_results WHERE round_id = ?')
+    const row = this.stmt('SELECT document_json FROM round_results WHERE round_id = ?')
       .get(roundId) as { document_json: string } | undefined
     return row ? JSON.parse(row.document_json) as ResultDocument : undefined
   }
@@ -475,9 +520,9 @@ export class ProductStore {
     if (!this.getSession(sessionId)) throw new Error(`Unknown product session: ${sessionId}`)
     const ownerToken = randomUUID()
     const durationMs = 15_000
-    const acquire = this.db.transaction(() => {
+    const acquired = this.transaction(() => {
       const now = Date.now()
-      const changed = this.db.prepare(`
+      const changed = this.stmt(`
         INSERT INTO session_leases(product_session_id, owner_token, expires_at_ms)
         VALUES (?, ?, ?)
         ON CONFLICT(product_session_id) DO UPDATE SET
@@ -486,12 +531,12 @@ export class ProductStore {
       `).run(sessionId, ownerToken, now + durationMs, now)
       return changed.changes === 1
     })
-    if (!acquire()) throw new Error('Session is already open in another window or process')
+    if (!acquired) throw new Error('Session is already open in another window or process')
 
     let released = false
     const assertHeld = (): void => {
       if (released) throw new Error('Session lease has been released or lost')
-      const row = this.db.prepare('SELECT owner_token, expires_at_ms FROM session_leases WHERE product_session_id = ?')
+      const row = this.stmt('SELECT owner_token, expires_at_ms FROM session_leases WHERE product_session_id = ?')
         .get(sessionId) as { owner_token: string; expires_at_ms: number } | undefined
       if (!row || row.owner_token !== ownerToken || row.expires_at_ms <= Date.now()) {
         released = true
@@ -505,7 +550,7 @@ export class ProductStore {
       if (released) return
       try {
         const now = Date.now()
-        const result = this.db.prepare(`
+        const result = this.stmt(`
           UPDATE session_leases SET expires_at_ms = ?
           WHERE product_session_id = ? AND owner_token = ? AND expires_at_ms > ?
         `).run(now + durationMs, sessionId, ownerToken, now)
@@ -529,7 +574,7 @@ export class ProductStore {
         if (released) return
         released = true
         clearInterval(timer)
-        this.db.prepare('DELETE FROM session_leases WHERE product_session_id = ? AND owner_token = ?')
+        this.stmt('DELETE FROM session_leases WHERE product_session_id = ? AND owner_token = ?')
           .run(sessionId, ownerToken)
         this.leases.delete(lease)
       }
@@ -539,31 +584,31 @@ export class ProductStore {
   }
 
   private requireRoundMode(roundId: string, mode: RoundMode): void {
-    const row = this.db.prepare('SELECT mode FROM rounds WHERE id = ?')
+    const row = this.stmt('SELECT mode FROM rounds WHERE id = ?')
       .get(roundId) as { mode: RoundMode } | undefined
     if (!row || row.mode !== mode) throw new Error(`Round is missing or is not ${mode}`)
   }
 
   private nextOrdinal(table: 'plan_versions' | 'vibe_entries', roundId: string): number {
-    const row = this.db.prepare(`SELECT COALESCE(MAX(ordinal), 0) + 1 AS next FROM ${table} WHERE round_id = ?`)
+    const row = this.stmt(`SELECT COALESCE(MAX(ordinal), 0) + 1 AS next FROM ${table} WHERE round_id = ?`)
       .get(roundId) as { next: number }
     return row.next
   }
 
   getDraft(sessionId: string): { draft: string; mode: RoundMode } {
-    const row = this.db.prepare('SELECT draft, mode, revision FROM drafts WHERE product_session_id = ?')
+    const row = this.stmt('SELECT draft, mode, revision FROM drafts WHERE product_session_id = ?')
       .get(sessionId) as DraftRow | undefined
     return row ? { draft: row.draft, mode: row.mode } : { draft: '', mode: 'plan' }
   }
 
   getDraftWithRevision(sessionId: string): DraftRow {
-    const row = this.db.prepare('SELECT draft, mode, revision FROM drafts WHERE product_session_id = ?')
+    const row = this.stmt('SELECT draft, mode, revision FROM drafts WHERE product_session_id = ?')
       .get(sessionId) as DraftRow | undefined
     return row ?? { draft: '', mode: 'plan', revision: 0 }
   }
 
   saveDraft(sessionId: string, draft: string, mode: RoundMode): void {
-    this.db.prepare(`
+    this.stmt(`
       INSERT INTO drafts(product_session_id, draft, mode, revision, updated_at)
       VALUES (?, ?, ?, 1, ?)
       ON CONFLICT(product_session_id) DO UPDATE SET
@@ -576,7 +621,7 @@ export class ProductStore {
 
   /** Clear only the draft that was submitted, preserving edits made while the runtime was busy. */
   clearDraftIfRevision(sessionId: string, revision: number): boolean {
-    const result = this.db.prepare(`
+    const result = this.stmt(`
       UPDATE drafts SET draft = '', revision = revision + 1, updated_at = ?
       WHERE product_session_id = ? AND revision = ?
     `).run(new Date().toISOString(), sessionId, revision)
@@ -584,7 +629,7 @@ export class ProductStore {
   }
 
   getModelSettings(): ModelSettings {
-    const row = this.db.prepare('SELECT provider, model, base_url FROM model_settings WHERE id = 1')
+    const row = this.stmt('SELECT provider, model, base_url FROM model_settings WHERE id = 1')
       .get() as SettingsRow | undefined
     return {
       provider: row?.provider ?? '',
@@ -595,7 +640,7 @@ export class ProductStore {
   }
 
   saveModelSettings(settings: SavedModelSettings): ModelSettings {
-    this.db.prepare(`
+    this.stmt(`
       INSERT INTO model_settings(id, provider, model, base_url) VALUES (1, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         provider = excluded.provider,
@@ -607,6 +652,7 @@ export class ProductStore {
 
   close(): void {
     for (const lease of [...this.leases]) lease.release()
+    this.statements.clear()
     this.db.close()
   }
 }

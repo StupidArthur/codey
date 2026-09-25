@@ -56,9 +56,11 @@ export class DshRuntime {
     }
     const provider = this.options.settings.provider.trim()
     const model = this.options.settings.model.trim()
+    const baseUrl = this.options.settings.baseUrl?.trim()
     if (!provider || !model) throw new Error('Configure a model provider and model before starting DSH')
-    if (this.options.credential && provider !== 'deepseek-official') {
-      throw new Error(`Credential environment mapping for provider "${provider}" is not configured`)
+    const official = provider === 'deepseek-official'
+    if (!official && !baseUrl) {
+      throw new Error(`Provider "${provider}" needs an OpenAI-compatible Base URL`)
     }
 
     const acp = await import('@agentclientprotocol/sdk')
@@ -66,12 +68,17 @@ export class DshRuntime {
     const dshBin = this.options.dshBin ?? resolveInstalledDshBin()
     this.patchDir = await mkdtemp(join(tmpdir(), 'temporal-acp-run-'))
     const patchPath = join(this.patchDir, 'profile.patch.yml')
-    await writeFile(patchPath, `- id: acp\n  config:\n    provider: ${yamlScalar(provider)}\n    model: ${yamlScalar(model)}\n`)
+    await writeFile(patchPath, providerPatch({ provider, model, baseUrl: baseUrl ?? '', official }))
 
     const env: NodeJS.ProcessEnv = { ...process.env }
     if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
-    if (this.options.credential) env.DEEPSEEK_API_KEY = this.options.credential
-    if (this.options.settings.baseUrl) env.DEEPSEEK_BASE_URL = this.options.settings.baseUrl
+    if (this.options.credential) {
+      // deepseek-official reads DEEPSEEK_API_KEY; any other provider is mounted
+      // as a hand-declared pi-ai OpenAI-compatible route using this env name.
+      if (official) env.DEEPSEEK_API_KEY = this.options.credential
+      else env.TEMPORAL_LLM_API_KEY = this.options.credential
+    }
+    if (baseUrl && official) env.DEEPSEEK_BASE_URL = baseUrl
     if (this.options.permission) env.DSH_PERMISSION_MODE = this.options.permission
 
     let child: ChildProcessWithoutNullStreams
@@ -206,6 +213,33 @@ export class DshRuntime {
 
 function yamlScalar(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+/**
+ * Builds the DSH patch that selects `provider`/`model` for the ACP profile.
+ * `deepseek-official` uses the shipped DeepSeek route. Any other provider is
+ * mounted as a hand-declared `@deepseek-ai/dsh-llm-pi-ai` OpenAI-compatible
+ * route pointing at `baseUrl`, so gateways like Volcengine ARK are pure config.
+ */
+function providerPatch(input: { provider: string; model: string; baseUrl: string; official: boolean }): string {
+  const acp = `- id: acp\n  config:\n    provider: ${yamlScalar(input.provider)}\n    model: ${yamlScalar(input.model)}\n`
+  if (input.official) return acp
+  return [
+    '- id: llm-pi-ai',
+    '  config:',
+    '    providers:',
+    `      ${yamlScalar(input.provider)}:`,
+    `        displayName: ${yamlScalar(input.provider)}`,
+    '        apiKeyEnv: TEMPORAL_LLM_API_KEY',
+    '        api: openai-completions',
+    `        baseURL: ${yamlScalar(input.baseUrl)}`,
+    '        models:',
+    `          - id: ${yamlScalar(input.model)}`,
+    `            name: ${yamlScalar(input.model)}`,
+    '            contextWindow: 131072',
+    '            maxTokens: 32768',
+    acp.trimEnd()
+  ].join('\n') + '\n'
 }
 
 function messageOf(error: unknown): string {

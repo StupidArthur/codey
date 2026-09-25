@@ -2,6 +2,9 @@ appId: ai.deepseek.temporal-workspace
 productName: Temporal Workspace
 directories:
   output: release
+# Reuse the Electron distribution that `pnpm install` already downloaded instead
+# of fetching a second copy from GitHub during every packaging run.
+electronDist: node_modules/electron/dist
 files:
   - out/**
   - package.json

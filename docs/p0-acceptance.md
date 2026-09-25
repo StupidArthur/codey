@@ -7,9 +7,11 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | 1 | ACP 发现旧 Session（`session/list(cwd)`） | **通过** |
-| 2 | 真实模型 P0 与恢复 | **未通过**（SDK resume 失败；ACP resume 可用） |
-| 3 | 正式 Runtime 改用 `HarnessClient` | **未运行** |
-| 4 | Windows 安装包验证 | **未运行** |
+| 2 | 真实模型 P0 与恢复 | **结论更新**：SDK resume 仍失败（上游缺口）；公开 ACP resume 通过并已成为执行路径 |
+| 3 | 正式 Runtime 统一到公开 ACP | **通过**（`dsh-acp-exec.mjs` + `dsh-runtime-impl.mjs`，真实模型） |
+| 4 | Windows 安装包验证 | 见 `docs/v1-acceptance.md`（本轮构建与实测） |
+
+以下阶段 1–2 的文字保留 `todo_1.md` 当时的实测记录；阶段 3 的执行路径决策与证据见 `docs/architecture-review.md` 与本文件末尾更新。`docs/dsh-upstream-resume-report.md` 作为 SDK 缺口事实报告保持不变。
 
 ---
 
@@ -108,15 +110,28 @@ $env:ELECTRON_RUN_AS_NODE='1'; & (node -e "console.log(require('electron'))") sc
 
 ---
 
-## 阶段 3 — 正式 Runtime 改用 `HarnessClient`：未运行
+## 阶段 3 — 正式 Runtime 统一到公开 ACP：通过
 
-依赖阶段 2 的真实模型验证；尚未开始。已确认 `@deepseek-ai/dsh-sdk-client@0.1.7-rc.2` 同时导出 `HarnessClient` 与 `DeepSeekHarness`，`DshRuntime.ts` 当前仍使用后者，且 `project()` 仍将普通 `assistant` 事件映射为 `thinking`（待阶段 3 修正）。
+架构决策与理由见 `docs/architecture-review.md`：`sdk` profile 无法 resume 持久 Session，公开 ACP `session/resume` 可以，因此 `DshRuntime` 统一走 `dsh --profile acp`（`session/new` | `session/resume` | `session/prompt`），provider/model 用生成的 `--patch` 注入，权限用 `DSH_PERMISSION_MODE`。
+
+真实模型探针（`scripts/probes/dsh-runtime-impl.mjs`，直接驱动正式 `DshRuntime`）：
+
+| 断言 | 结果 |
+| --- | --- |
+| 新 Session 首次 prompt 建立标记 | 通过 |
+| 关闭运行时后新进程 resume 同一 ID 并取回标记 | 通过（`passed: true`） |
+| 普通 assistant 文本不进入 thinking，仅 reasoning 事件进入 | 通过（`projection.ts`） |
+| 子进程回收与 stderr 捕获 | 通过 |
+
+`scripts/probes/dsh-acp-exec.mjs` 另验证文件写入与事件种类（`agent_message_chunk` / `agent_thought_chunk` / `tool_call` / `tool_call_update` / `usage_update`）。`scripts/probes/dsh-runtime-p0.mjs` 的 SDK resume 失败记录仍有效，仅代表 SDK wire 缺口，不再代表产品执行路径。
+
+产品域不变量（不依赖模型）由 `scripts/probes/temporal-domain.mjs` 覆盖：迁移、权限默认值、draft revision、执行开始/结束顺序、中断 reconcile、Plan 版本、Vibe 累积、Loop 各终态、证据 cross-check、同进程与跨进程租约（含崩溃后 TTL 保持）。全部断言通过。
 
 ---
 
-## 阶段 4 — Windows 安装包验证：未运行
+## 阶段 4 — Windows 安装包验证
 
-尚未构建 `dist:win`，未验证安装包内 DSH 路径解析、Node 模式启动、真实提交、子进程回收、原 Session 恢复与跨进程独占。
+见 `docs/v1-acceptance.md`：记录 `pnpm.cmd typecheck`、`pnpm.cmd build`、`pnpm.cmd dist:win` 结果、安装包路径，以及安装后应用内的实测项（内置 DSH 解析、Node 模式、模型设置、真实提交、发现/恢复、子进程回收、重启恢复、两窗口/两进程独占）。未运行或失败项如实标注。
 
 ---
 

@@ -4,7 +4,8 @@ packages:
 allowBuilds:
   '@deepseek-ai/dsh-subprocess-local': true
   '@google/genai': false
-  better-sqlite3: true
+  better-sqlite3: set this to true or false
+  electron: true
   electron-winstaller: false
   esbuild: true
   koffi: true

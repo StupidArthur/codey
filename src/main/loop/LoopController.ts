@@ -1,6 +1,6 @@
 import type { ExecutionOutcome, LoopTerminalSummary, RunnerEvent } from '../../shared/contracts'
 import type { DshRuntime } from '../dsh/DshRuntime'
-import type { EvidenceBundle, EvidenceCollector } from '../evidence/EvidenceCollector'
+import type { EvidenceBundle, EvidenceCollector, VerificationClaim } from '../evidence/EvidenceCollector'
 
 export interface LoopBudget {
   maxContinuations: number
@@ -49,10 +49,12 @@ export class LoopController {
     const startedAt = Date.now()
     const errorCounts = new Map<string, number>()
     let changedSoFar = new Set<string>()
+    const accumulatedChanges = new Set<string>()
+    const accumulatedNewFiles = new Set<string>()
+    const accumulatedVerification: VerificationClaim[] = []
     let noProgress = 0
     let continuations = 0
     let finalResponse = ''
-    let lastEvidence: EvidenceBundle = emptyBundle('completed')
     let prompt = input.rootSpec
 
     for (;;) {
@@ -67,13 +69,25 @@ export class LoopController {
       const outcome: ExecutionOutcome = failure ? 'failed' : 'completed'
       const events = input.takeEvents()
       const evidence = await this.collector.collect(input.workspacePath, baseline, events, outcome)
-      lastEvidence = evidence
+
+      // Accumulate across continuations so the Result reflects every file the
+      // loop touched, not only the final turn. Completion decisions below still
+      // read the current turn's evidence.
+      for (const file of evidence.changedFiles) accumulatedChanges.add(file)
+      for (const file of evidence.newFiles) accumulatedNewFiles.add(file)
+      for (const claim of evidence.verification) accumulatedVerification.push(claim)
+      const cumulative: EvidenceBundle = {
+        ...evidence,
+        changedFiles: [...accumulatedChanges],
+        newFiles: [...accumulatedNewFiles],
+        verification: dedupeClaims(accumulatedVerification)
+      }
 
       if (failure) {
         const count = (errorCounts.get(failure) ?? 0) + 1
         errorCounts.set(failure, count)
         if (count >= this.budget.maxSameError) {
-          return this.finish('failed', `Same error repeated ${count} times: ${truncate(failure)}`, finalResponse, evidence, continuations)
+          return this.finish('failed', `Same error repeated ${count} times: ${truncate(failure)}`, finalResponse, cumulative, continuations)
         }
       } else {
         finalResponse = text
@@ -84,24 +98,24 @@ export class LoopController {
         noProgress = progressed ? 0 : noProgress + 1
 
         if (BLOCKED.test(text)) {
-          return this.finish('blocked', 'The model reported that it needs input or lacks a capability.', finalResponse, evidence, continuations)
+          return this.finish('blocked', 'The model reported that it needs input or lacks a capability.', finalResponse, cumulative, continuations)
         }
         if (this.complete(text, evidence)) {
-          return this.finish('completed', 'Spec requirements are covered by passing verification evidence.', finalResponse, evidence, continuations)
+          return this.finish('completed', 'Spec requirements are covered by passing verification evidence.', finalResponse, cumulative, continuations)
         }
         if (noProgress >= this.budget.maxNoProgress) {
-          return this.finish('failed', `No progress after ${noProgress} consecutive continuations.`, finalResponse, evidence, continuations)
+          return this.finish('failed', `No progress after ${noProgress} consecutive continuations.`, finalResponse, cumulative, continuations)
         }
       }
 
       if (Date.now() - startedAt >= this.budget.maxElapsedMs) {
-        return this.finish('budget_exhausted', 'Loop reached the 2 hour wall-clock budget.', finalResponse, evidence, continuations)
+        return this.finish('budget_exhausted', 'Loop reached the 2 hour wall-clock budget.', finalResponse, cumulative, continuations)
       }
       if (continuations >= this.budget.maxContinuations) {
-        return this.finish('budget_exhausted', `Loop reached the ${this.budget.maxContinuations} continuation budget.`, finalResponse, evidence, continuations)
+        return this.finish('budget_exhausted', `Loop reached the ${this.budget.maxContinuations} continuation budget.`, finalResponse, cumulative, continuations)
       }
       continuations += 1
-      prompt = continuePrompt(input.rootSpec, evidence, failure)
+      prompt = continuePrompt(input.rootSpec, cumulative, failure)
     }
   }
 
@@ -122,6 +136,18 @@ export class LoopController {
   }
 }
 
+function dedupeClaims(claims: VerificationClaim[]): VerificationClaim[] {
+  const seen = new Set<string>()
+  const unique: VerificationClaim[] = []
+  for (const claim of claims) {
+    const key = `${claim.label}\u0000${claim.outcome}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(claim)
+  }
+  return unique
+}
+
 function continuePrompt(rootSpec: string, evidence: EvidenceBundle, failure?: string): string {
   const changed = evidence.changedFiles.slice(0, 10).join(', ') || 'none'
   const verified = evidence.verification.map((claim) => `${claim.label} (${claim.outcome})`).join('; ') || 'none'
@@ -139,8 +165,4 @@ function continuePrompt(rootSpec: string, evidence: EvidenceBundle, failure?: st
 function truncate(text: string, max = 200): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
-}
-
-function emptyBundle(outcome: ExecutionOutcome): EvidenceBundle {
-  return { changedFiles: [], newFiles: [], verification: [], outcome }
 }

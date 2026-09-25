@@ -37,19 +37,23 @@ await esbuild.build({
 })
 const { DshRuntime } = require(bundlePath)
 
-const hasKey = Boolean(process.env.DEEPSEEK_API_KEY)
+const provider = process.env.TEMPORAL_TEST_PROVIDER ?? 'deepseek-official'
+const model = process.env.TEMPORAL_TEST_MODEL ?? 'deepseek-v4-flash'
+const baseUrl = process.env.TEMPORAL_TEST_BASE_URL
+const credential = provider === 'deepseek-official' ? process.env.DEEPSEEK_API_KEY : process.env.TEMPORAL_TEST_API_KEY
+const hasKey = Boolean(credential)
 const token = `impl-${randomUUID().slice(0, 8)}`
-const evidence = { hasKey }
+const evidence = { hasKey, provider, model, hasBaseUrl: Boolean(baseUrl) }
 if (!hasKey) {
-  console.log(JSON.stringify({ ...evidence, status: 'skipped', reason: 'DEEPSEEK_API_KEY absent' }, null, 2))
+  console.log(JSON.stringify({ ...evidence, status: 'skipped', reason: 'credential absent' }, null, 2))
   process.exitCode = 2
 } else {
-  const settings = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
+  const settings = { provider, model, ...(baseUrl ? { baseUrl } : {}) }
   const kindsFor = (events) => [...new Set(events.map((e) => e.kind))]
   let sessionId
 
   const firstEvents = []
-  const first = new DshRuntime({ workspacePath: workspace, settings, credential: process.env.DEEPSEEK_API_KEY, onEvent: (e) => firstEvents.push(e) })
+  const first = new DshRuntime({ workspacePath: workspace, settings, credential, onEvent: (e) => firstEvents.push(e) })
   try {
     const started = await first.start()
     sessionId = started.sessionId
@@ -61,7 +65,7 @@ if (!hasKey) {
   }
 
   const secondEvents = []
-  const second = new DshRuntime({ workspacePath: workspace, settings, credential: process.env.DEEPSEEK_API_KEY, onEvent: (e) => secondEvents.push(e) })
+  const second = new DshRuntime({ workspacePath: workspace, settings, credential, onEvent: (e) => secondEvents.push(e) })
   try {
     const started = await second.start(sessionId)
     const r3 = await second.prompt('What token did I ask you to remember before restart? Reply with only that token.')

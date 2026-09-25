@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { randomUUID } from 'node:crypto'
 import { readdir, stat } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type { EvidenceSummary, ExecutionOutcome, RunnerEvent } from '../../shared/contracts'
@@ -12,8 +13,18 @@ const VERIFICATION_LABEL = /test|vitest|jest|typecheck|tsc|build|lint|compile/i
 
 export interface WorkspaceBaseline {
   git: boolean
-  files: Set<string>
-  startedAt: number
+  /**
+   * Non-git workspaces: relative path → file stamp captured before the
+   * execution. Diffing a fresh snapshot against this map detects created and
+   * modified files without relying on a wall-clock cutoff, which raced with
+   * filesystems that round mtimes down to the second.
+   */
+  files: Map<string, FileStamp>
+}
+
+interface FileStamp {
+  mtimeMs: number
+  size: number
 }
 
 export interface VerificationClaim {
@@ -37,8 +48,7 @@ export class EvidenceCollector {
     const git = await isGitRepo(workspacePath)
     return {
       git,
-      files: git ? await gitChangedFiles(workspacePath) : new Set(),
-      startedAt: Date.now()
+      files: git ? new Map() : await snapshotFiles(workspacePath)
     }
   }
 
@@ -62,7 +72,7 @@ export class EvidenceCollector {
       const diff = await git(workspacePath, ['diff', '--stat'])
       if (diff?.trim()) gitDiffSummary = diff.trim().slice(0, MAX_DIFF)
     } else {
-      for (const file of await recentlyModified(workspacePath, baseline.startedAt)) {
+      for (const file of await changedSince(workspacePath, baseline.files)) {
         changedFiles.push(file)
         if (!baseline.files.has(file)) newFiles.push(file)
       }
@@ -82,16 +92,16 @@ export class EvidenceCollector {
     const records: EvidenceSummary[] = []
     bundle.changedFiles.forEach((file, index) => {
       records.push({
-        id: `ws-${index}-${file}`.slice(0, 120), kind: 'workspace', label: file,
+        id: randomUUID(), kind: 'workspace', label: file,
         detail: bundle.newFiles.includes(file) ? 'created' : 'modified', outcome: 'observed',
         provenance: 'tool', observedAt: at(index)
       })
     })
     if (bundle.gitDiffSummary) {
-      records.push({ id: 'git-diff', kind: 'workspace', label: 'git diff --stat', detail: bundle.gitDiffSummary, outcome: 'observed', provenance: 'tool', observedAt: at(records.length) })
+      records.push({ id: randomUUID(), kind: 'workspace', label: 'git diff --stat', detail: bundle.gitDiffSummary, outcome: 'observed', provenance: 'tool', observedAt: at(records.length) })
     }
-    bundle.verification.forEach((claim, index) => {
-      records.push({ id: `verify-${index}`, kind: 'command', label: claim.label, detail: claim.detail, outcome: claim.outcome, provenance: claim.provenance, observedAt: at(records.length) })
+    bundle.verification.forEach((claim) => {
+      records.push({ id: randomUUID(), kind: 'command', label: claim.label, detail: claim.detail, outcome: claim.outcome, provenance: claim.provenance, observedAt: at(records.length) })
     })
     return records
   }
@@ -110,11 +120,6 @@ async function isGitRepo(workspacePath: string): Promise<boolean> {
   return (await git(workspacePath, ['rev-parse', '--is-inside-work-tree']))?.trim() === 'true'
 }
 
-async function gitChangedFiles(workspacePath: string): Promise<Set<string>> {
-  const status = await git(workspacePath, ['status', '--porcelain'])
-  return new Set((status ?? '').split('\n').map((line) => line.slice(3).trim()).filter(Boolean))
-}
-
 async function git(workspacePath: string, args: string[]): Promise<string | null> {
   try {
     const { stdout } = await run('git', ['-C', workspacePath, ...args], { maxBuffer: 8 * 1024 * 1024, windowsHide: true })
@@ -124,11 +129,12 @@ async function git(workspacePath: string, args: string[]): Promise<string | null
   }
 }
 
-async function recentlyModified(root: string, since: number): Promise<string[]> {
-  const found: string[] = []
+/** Relative path → stamp for every ordinary file reachable within depth 3. */
+async function snapshotFiles(root: string): Promise<Map<string, FileStamp>> {
+  const found = new Map<string, FileStamp>()
   const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }]
   let visited = 0
-  while (queue.length > 0 && visited < MAX_WALK && found.length < MAX_FILES) {
+  while (queue.length > 0 && visited < MAX_WALK && found.size < MAX_FILES) {
     const { dir, depth } = queue.shift()!
     let entries
     try { entries = await readdir(dir, { withFileTypes: true }) } catch { continue }
@@ -143,11 +149,22 @@ async function recentlyModified(root: string, since: number): Promise<string[]> 
       if (!entry.isFile()) continue
       try {
         const info = await stat(full)
-        if (info.mtimeMs >= since) found.push(relative(root, full).replace(/\\/g, '/'))
+        found.set(relative(root, full).replace(/\\/g, '/'), { mtimeMs: info.mtimeMs, size: info.size })
       } catch { /* ignore */ }
     }
   }
   return found
+}
+
+/** Files that appeared or were touched between the baseline and now. */
+async function changedSince(root: string, baseline: Map<string, FileStamp>): Promise<string[]> {
+  const now = await snapshotFiles(root)
+  const changed: string[] = []
+  for (const [file, stamp] of now) {
+    const before = baseline.get(file)
+    if (before === undefined || before.mtimeMs !== stamp.mtimeMs || before.size !== stamp.size) changed.push(file)
+  }
+  return changed
 }
 
 function dedupe(values: string[]): string[] {
