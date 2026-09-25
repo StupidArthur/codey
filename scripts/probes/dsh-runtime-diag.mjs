@@ -3,8 +3,10 @@
  * probe, one Node host process starts two `dsh --profile sdk` runtime
  * subprocesses in sequence against the same temporary DSH home.
  *
- * Prints only phase status, event kinds/counts and JSON-RPC error fields —
- * never credentials, prompts, model answers or memory tokens.
+ * Prints only phase status, event kinds/counts and JSON-RPC error fields.
+ * Error text is redacted for credential-like environment values and the
+ * probe's own memory token, then flattened and truncated. The probe never
+ * prints prompts or model responses.
  */
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -21,12 +23,22 @@ const hasKey = Boolean(process.env.DEEPSEEK_API_KEY)
 const token = `diag-${randomUUID().slice(0, 8)}`
 const out = { hasKey, hostProcess: process.pid, workspace, dshHome }
 
+/** Values that must never appear even inside a truncated error message. */
+const secrets = [...new Set([
+  token,
+  ...Object.entries(process.env)
+    .filter(([key, value]) => typeof value === 'string' && value.length >= 8 && /(API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key))
+    .map(([, value]) => value)
+])].filter((value) => value.length > 0)
+
 function makeHarness() {
   return new DeepSeekHarness({ profile: 'sdk', cwd: workspace, processCwd: workspace, dshHome, provider, model, initializeTimeoutMs: 60_000 })
 }
 
 function sanitize(text) {
-  return String(text).replace(/[\r\n]+/g, ' ').slice(0, 200)
+  let out = String(text)
+  for (const secret of secrets) out = out.split(secret).join('[redacted]')
+  return out.replace(/[\r\n]+/g, ' ').slice(0, 200)
 }
 
 function describeError(error) {

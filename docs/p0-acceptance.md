@@ -86,7 +86,9 @@ $env:ELECTRON_RUN_AS_NODE='1'; & (node -e "console.log(require('electron'))") sc
 | `first-close` / `second-close` | 通过 | `close()` 真实 resolve；探针只在 resolve 后记 `passed: true`，失败会记录错误并使总状态失败 |
 | `resume-after-restart` | **失败** | `name: "JsonRpcResponseError"`、`code: -32603`、`message: "session \"<id>\" already exists"`（字段由探针从抛出的错误读取，非硬编码） |
 
-一次运行的实测输出（脱敏，退出码 1）：`code` 与 `message` 由 `dsh-runtime-p0.mjs` 直接记录；`first-close`、`second-close` 均为 `passed: true`，即两次 `close()` 都实际成功。诊断探针 `dsh-runtime-diag.mjs` 输出同样字段并在失败时退出码 1。
+一次运行的实测输出（脱敏，退出码 1）：`code` 与 `message` 由 `dsh-runtime-p0.mjs` 直接记录；`first-close`、`second-close` 均为 `passed: true`，即两次 `close()` 都实际成功。错误文本在压平/截断前会先对 credential-like 环境变量值与该探针自己的记忆 token 做 `[redacted]` 替换。
+
+退出码语义：`0` 全部通过；`1` 有阶段失败（**无凭证时若 `initialize`/`first-close` 等已运行阶段失败，同样为 1**）；`2` 无凭证且已运行阶段全部通过（模型阶段跳过）。无凭证失败路径已实测：`P0_PROVIDER=definitely-not-a-provider` 时输出 `status: "failed"`、`reason: "a pre-model phase failed..."`、退出码 1。诊断探针 `dsh-runtime-diag.mjs` 输出同样字段并在失败时退出码 1。
 
 **根因（公开代码可复核）**：`@deepseek-ai/dsh-sdk-jsonrpc-server` 的 `prompt` 对每个 sessionId 都调用 `ctx.agents.create({ sessionId, meta })`，从不调用 `ctx.agents.resume(...)`。Session 已持久化时 `agents.create` 抛 `already exists`。SDK wire 只有 `initialize` / `session/prompt` / `shutdown`，没有 resume 方法。
 
@@ -130,8 +132,8 @@ $env:ELECTRON_RUN_AS_NODE='1'; & (node -e "console.log(require('electron'))") sc
 - `scripts/probes/dsh-session-discovery-impl.mjs`（新增）
 - `scripts/probes/dsh-session-merge.mjs`（新增）
 - `scripts/probes/dsh-discovery-persistence.mjs`（新增）
-- `scripts/probes/dsh-runtime-p0.mjs`（结构化阶段报告、真实 close 状态、JSON-RPC 错误字段、退出码）
-- `scripts/probes/dsh-runtime-diag.mjs`（新增，失败定位；同样记录真实 close 状态与错误字段，失败退出码 1）
+- `scripts/probes/dsh-runtime-p0.mjs`（结构化阶段报告、真实 close 状态、JSON-RPC 错误字段、密钥脱敏、退出码；无凭证的已运行阶段失败也判 1）
+- `scripts/probes/dsh-runtime-diag.mjs`（新增，失败定位；同样记录真实 close 状态、错误字段与密钥脱敏，失败退出码 1）
 - `scripts/probes/dsh-acp-resume.mjs`（新增，ACP resume 对照）
 - `docs/dsh-integration-status.md`、`docs/architecture-review.md`、`requirement/dsh-final-system-design.md`（同步 V1 决策与阶段 2 结论）
 - `docs/dsh-upstream-resume-report.md`（面向上游的 resume 缺陷报告）

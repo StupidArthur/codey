@@ -9,9 +9,13 @@
  * harness is the cross-process (new runtime subprocess) resume attempt.
  *
  * Prints only phase status, session id, event kinds/counts, JSON-RPC error
- * fields and sanitized assertions — never content, memory tokens or keys.
+ * fields and sanitized assertions. Error text is redacted for credential-like
+ * environment values and the probe's own memory token, then flattened and
+ * truncated. The probe never prints prompts or model responses.
  *
- * Exit codes: 0 = all phases passed; 1 = a phase failed; 2 = skipped (no credential).
+ * Exit codes: 0 = all phases passed; 1 = a phase failed (including pre-model
+ * phases without a credential); 2 = skipped because no credential was present
+ * and every phase that did run passed.
  */
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -38,9 +42,19 @@ function makeHarness() {
   })
 }
 
-/** Truncated, whitespace-flattened error message; never contains credentials. */
+/** Values that must never appear even inside a truncated error message. */
+const secrets = [...new Set([
+  memoryToken,
+  ...Object.entries(process.env)
+    .filter(([key, value]) => typeof value === 'string' && value.length >= 8 && /(API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i.test(key))
+    .map(([, value]) => value)
+])].filter((value) => value.length > 0)
+
+/** Redact known secrets, then flatten newlines and truncate. */
 function sanitize(text) {
-  return String(text).replace(/[\r\n]+/g, ' ').slice(0, 200)
+  let out = String(text)
+  for (const secret of secrets) out = out.split(secret).join('[redacted]')
+  return out.replace(/[\r\n]+/g, ' ').slice(0, 200)
 }
 
 /** Record only the fields the thrown error actually exposes. */
@@ -128,8 +142,14 @@ if (hasCredential && sessionId && !fatal) {
 
 const failed = phases.some((phase) => phase.passed === false)
 if (!hasCredential) {
-  console.log(JSON.stringify({ status: 'partial', reason: 'DEEPSEEK_API_KEY is absent; prompt and resume probes skipped', workspacePath, dshHome, phases }, null, 2))
-  process.exitCode = 2
+  console.log(JSON.stringify({
+    status: failed ? 'failed' : 'partial',
+    reason: failed
+      ? 'a pre-model phase failed before credential-gated phases could run'
+      : 'DEEPSEEK_API_KEY is absent; prompt and resume probes skipped',
+    workspacePath, dshHome, phases
+  }, null, 2))
+  process.exitCode = failed ? 1 : 2
 } else {
   console.log(JSON.stringify({ status: failed ? 'failed' : 'passed', workspacePath, dshHome, sessionId, phases }, null, 2))
   process.exitCode = failed ? 1 : 0

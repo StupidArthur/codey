@@ -47,7 +47,9 @@ Observed (sanitized structured output; `status: "failed"`, exit code 1). Verbati
 | `resume-after-restart` | **failed** | `name: "JsonRpcResponseError"`, `code: -32603`, `message: "session \"session-<id>\" already exists"` |
 | `second-close` | passed | `close()` resolved |
 
-`first-close`/`second-close` are reported `passed: true` only after `close()` actually resolves; a rejected `close()` records `passed: false` with the error fields and fails the run. The error fields are read from the thrown error (`JsonRpcResponseError.code` is `number | undefined`); `-32603` is what that run observed, not a hardcoded value.
+`first-close`/`second-close` are reported `passed: true` only after `close()` actually resolves; a rejected `close()` records `passed: false` with the error fields and fails the run. The error fields are read from the thrown error (`JsonRpcResponseError.code` is `number | undefined`); `-32603` is what that run observed, not a hardcoded value. Error text is redacted for credential-like environment values and the probe's own memory token before flattening/truncation.
+
+Exit codes: `0` all phases passed; `1` a phase failed — including a pre-model failure when no credential is present; `2` no credential and every phase that ran passed (model phases skipped).
 
 A shorter diagnostic with per-phase isolation and the same close/error semantics is `scripts/probes/dsh-runtime-diag.mjs`:
 
