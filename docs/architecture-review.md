@@ -40,8 +40,8 @@ DSH is authoritative for conversation, execution, and model context. SQLite is a
 | Gate | Required evidence | Current result |
 | --- | --- | --- |
 | G0 — package closure | Reproducible install of matched DSH + SDK | Passed locally with pinned lockfile |
-| G1 — runtime | Initialize, first prompt, sequential prompt, resume, notifications, close | Initialize passed; prompt/resume/notification paths unverified |
-| G2 — discovery/history | Public API lists sessions by canonical cwd and reads legacy history | **Blocked**: SDK lacks both; ACP listing needs adapter verification; no verified public history read |
+| G1 — runtime | Initialize, first prompt, sequential prompt, resume, notifications, close | **Partial** (2026-09-25): initialize, first prompt, sequential prompt with inherited context, notifications and close passed with a real credential; **cross-process resume fails** because the `sdk` profile server only calls `agents.create` and never `agents.resume` (`session "<id>" already exists`). Public ACP `session/resume` does inherit context across processes |
+| G2 — discovery/history | Public API lists sessions by canonical cwd and reads legacy history | **Partial** (2026-09-25): ACP `session/list(cwd)` adapter implemented and verified for isolation/pagination; legacy history read remains unavailable by public API and is shown as an explicit read-only placeholder |
 | G3 — persistence | Migration, draft revision race, restart reconciliation | Basic SQLite smoke passed; restart reconciliation unverified |
 | G4 — semantics | Plan revisions, Vibe entries, Loop budget/terminal states | Not implemented |
 | G5 — result trust | Evidence-backed Verification and truthful terminal reason | Not implemented |
@@ -55,7 +55,7 @@ Passing a build is not acceptance of a gate that requires runtime behavior.
 - In-memory session locks protect windows in one main process but do not meet the cross-process exclusivity decision.
 - The current store now contains provisional tables for Plan revisions, Vibe entries, evidence, results, and session leases; their integration and restart behavior are not yet accepted.
 - The renderer now uses CodeMirror 6; visual and end-to-end behavior is not yet accepted.
-- Legacy Session discovery and History must not be simulated from private DSH files or inferred from Temporal's own SQLite records.
+- Legacy Session discovery now uses public ACP `session/list(cwd)` (`SessionDiscovery`) and merges with ProductStore records; legacy history remains unreadable and must not be simulated from private DSH files or inferred from Temporal's own SQLite records.
 - The current Loop action explicitly fails. It must remain unavailable until the controller and evidence gate are accepted.
 
 ## Engineering assignments and acceptance ownership

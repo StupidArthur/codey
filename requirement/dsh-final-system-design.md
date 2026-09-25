@@ -151,7 +151,7 @@ DSH 的 Workspace subsystem 本身以 canonical directory path 作为 Workspace 
 5. 用户选择 Session
 6. 打开工作窗口并 resume 该 DSH Session
 7. 加载本产品保存的 Round / Result UI 数据
-8. 如果有 Temporal Round，默认选择最新成果页；如果没有，显示只读的 Imported DSH Session History 页面
+8. 如果有 Temporal Round，默认选择最新成果页；如果没有，且这是已有 DSH Session，则显示只读的 `Historical transcript unavailable` 占位（不伪造 History 内容）
 ```
 
 用户不需要看到或手动输入 Session ID。
@@ -882,14 +882,15 @@ workspace selected
 对于从未被 Temporal Workspace 使用过、没有产品 Round 数据的旧 DSH Session：
 
 ```text
-左侧：Imported DSH Session → 只读 History 页面
+左侧：Existing DSH Session（无 Temporal Round）
 右侧：空 Spec，默认 Plan
+中间：只读占位 `Historical transcript unavailable`
 Temporal Round 数量：0
 ```
 
-History 页面提供可浏览的旧历史摘要或原始对话入口；不倒推旧 Plan、Vibe、Loop 或 Round，也不把旧历史写入产品 Round 表。**Legacy DSH history is inherited, not reconstructed; Temporal structure begins from the first submission made through this product.**
+旧 DSH 历史只读继承，不重建旧 Plan、Vibe、Loop 或 Round，也不把旧历史写入产品 Round 表。**当前公开 SDK wire 与 ACP `session/list` 只提供 Session 的发现与 resume，不提供 transcript/消息读取**（`session/load` 不受支持，旧更新不回放）。因此该占位明确声明旧历史不可读，而不是伪造或倒推内容；`Temporal structure begins from the first submission made through this product.`
 
-第一次 Temporal 提交必须在原有 `dsh_session_id` 上继续，使 DSH 原生 conversation/context 自然衔接；产品不重新向模型注入旧历史。该提交创建 Round 1。此后左侧时间线为 `Imported History → Round 1 → Round 2 → …`。
+第一次 Temporal 提交必须在原有 `dsh_session_id` 上继续，使 DSH 原生 conversation/context 自然衔接；产品不重新向模型注入旧历史。该提交创建 Round 1。此后左侧时间线为 `Round 1 → Round 2 → …`。
 
 新 Session：
 
@@ -1439,7 +1440,7 @@ Spec: blank markdown
 Runner: hidden
 ```
 
-旧 DSH Session 没有 Temporal Round 时是单独的兼容状态：左侧显示 `Imported DSH Session`，中间显示只读 History，右侧为空 Spec 且默认 Plan；第一次提交沿用原 DSH Session 并创建 Round 1。
+旧 DSH Session 没有 Temporal Round 时是单独的兼容状态：左侧显示 `Existing DSH Session`，中间显示只读占位 `Historical transcript unavailable`，右侧为空 Spec 且默认 Plan；第一次提交沿用原 DSH Session 并创建 Round 1。
 
 ### 34.2 Idle with results
 

@@ -8,3 +8,4 @@ release/
 .tmp/
 *.tsbuildinfo
 *.log
+scripts/probes/.cache-*.cjs

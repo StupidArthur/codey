@@ -10,6 +10,11 @@ const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'Vibe', loop
 const statusLabels: Record<string, string> = {
   active: '进行中', completed: '已完成', blocked: '已阻塞', budget_exhausted: '预算已耗尽', failed: '失败', interrupted: '已中断'
 }
+const kindLabels: Record<SessionSummary['kind'], string> = {
+  new: '尚无 Temporal Round',
+  temporal: 'Temporal Session',
+  legacy: 'DSH 原生 Session · 无 Temporal Round'
+}
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -67,9 +72,10 @@ function App(): React.JSX.Element {
   const [error, setError] = useState('')
   const [workspacePath, setWorkspacePath] = useState<string | null>(null)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [discoveryError, setDiscoveryError] = useState('')
   const [draft, setDraft] = useState('')
   const [mode, setMode] = useState<RoundMode>('plan')
-  const [selectedId, setSelectedId] = useState<string | 'history' | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sourceView, setSourceView] = useState(true)
   const [runnerOpen, setRunnerOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -94,7 +100,7 @@ function App(): React.JSX.Element {
       setMode(next.mode)
     }
     if (sessionChanged) {
-      setSelectedId(next.rounds.at(-1)?.id ?? (next.importedHistoryMarkdown?.trim() ? 'history' : null))
+      setSelectedId(next.rounds.at(-1)?.id ?? null)
     } else if (previous && next.rounds.length > previous.rounds.length) {
       setSelectedId(next.rounds.at(-1)?.id ?? null)
     }
@@ -116,7 +122,11 @@ function App(): React.JSX.Element {
     if (!workspacePath || snapshot?.session) return
     let active = true
     setBusy(true)
-    window.temporal.listSessions(workspacePath).then(items => { if (active) setSessions(items) })
+    window.temporal.listSessions(workspacePath).then(result => {
+      if (!active) return
+      setSessions(result.sessions)
+      setDiscoveryError(result.discoveryError ?? '')
+    })
       .catch(e => { if (active) setError(messageOf(e)) })
       .finally(() => { if (active) setBusy(false) })
     return () => { active = false }
@@ -136,7 +146,7 @@ function App(): React.JSX.Element {
     try {
       setError('')
       const path = await window.temporal.chooseWorkspace()
-      if (path) { setWorkspacePath(path); setSessions([]) }
+      if (path) { setWorkspacePath(path); setSessions([]); setDiscoveryError('') }
     } catch (e) { setError(messageOf(e)) }
   }
 
@@ -220,9 +230,10 @@ function App(): React.JSX.Element {
             <div className="launch-card-head"><div><strong>Workspace</strong><span>{workspacePath ?? '尚未选择目录'}</span></div><button className="secondary-button" onClick={chooseWorkspace} disabled={busy}>{workspacePath ? '更换目录' : '选择目录'}</button></div>
             {workspacePath && <div className="session-list">
               {sessions.map(item => <button className="session-row" key={item.id} onClick={() => openSession(item.id)} disabled={busy}>
-                <span className="session-icon">{item.title.slice(0, 1).toUpperCase()}</span><span className="session-row-copy"><strong>{item.title}</strong><small>{new Date(item.updatedAt).toLocaleString()} · {item.hasTemporalHistory ? 'Temporal Session' : '尚无 Temporal Round'}</small></span><span className="row-arrow">→</span>
+                <span className="session-icon">{item.title.slice(0, 1).toUpperCase()}</span><span className="session-row-copy"><strong>{item.title}</strong><small>{item.updatedAt ? `${new Date(item.updatedAt).toLocaleString()} · ` : ''}{kindLabels[item.kind]}</small></span><span className="row-arrow">→</span>
               </button>)}
-              {sessions.length === 0 && !busy && <p className="empty-sessions">暂无本产品记录的 Session；DSH 原生 Session 发现尚未接入。</p>}
+              {sessions.length === 0 && !busy && <p className="empty-sessions">该目录暂无已有 Session；可直接新建。</p>}
+              {discoveryError && <p className="empty-sessions" role="alert">DSH 原生 Session 发现失败：{discoveryError}</p>}
               <button className="session-row new-session" onClick={() => openSession()} disabled={busy}>
                 <span className="session-icon">＋</span><span className="session-row-copy"><strong>New Session</strong><small>创建后从 Plan 开始</small></span><span className="row-arrow">→</span>
               </button>
@@ -235,7 +246,6 @@ function App(): React.JSX.Element {
         <aside className="sidebar" aria-label="Session 时间线">
           <div className="sidebar-header"><button className="icon-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}>{sidebarCollapsed ? '›' : '‹'}</button><div className="sidebar-name"><strong>{snapshot.session.title}</strong><small title={snapshot.workspacePath ?? ''}>{snapshot.workspacePath}</small></div></div>
           <nav className="timeline" aria-label="Round 列表">
-            {snapshot.importedHistoryMarkdown?.trim() && <button className={`timeline-item ${selectedId === 'history' ? 'selected' : ''}`} onClick={() => setSelectedId('history')} title="Imported DSH Session History"><span className="round-index">H</span><span className="timeline-copy"><strong>Imported History</strong><small>DSH 原生历史 · 只读</small></span></button>}
             {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''}`} onClick={() => setSelectedId(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
               <span className="round-index">{round.sequence}</span><span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]} · {statusLabels[round.status]}</small></span>
             </button>)}
@@ -244,8 +254,8 @@ function App(): React.JSX.Element {
         </aside>
         <section className="result-pane" aria-label="结果页面">
           {selectedRound ? <article className="document"><div className="document-header"><div className="eyebrow">ROUND {selectedRound.sequence} · {modeLabels[selectedRound.mode]}</div><h1>{selectedRound.title}</h1><div className="document-meta"><span className={`status status-${selectedRound.status}`}>{statusLabels[selectedRound.status]}</span><span>{new Date(selectedRound.updatedAt).toLocaleString()}</span></div></div><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedRound.bodyMarkdown || '本轮尚无结果。'}</ReactMarkdown></div></article>
-            : selectedId === 'history' && snapshot.importedHistoryMarkdown?.trim() ? <article className="document"><div className="document-header"><div className="eyebrow">IMPORTED DSH SESSION</div><h1>History</h1><p>原生历史只读继承；Temporal Round 从首次提交开始。</p></div><div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{snapshot.importedHistoryMarkdown}</ReactMarkdown></div></article>
-            : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。若这是已有 DSH Session，其原生历史目前没有可展示的数据。</p></div>}
+            : snapshot.historyState === 'legacy-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">EXISTING DSH SESSION</div><h1>Historical transcript unavailable</h1><p>该 DSH Session 的旧对话无法通过公开接口读取。旧历史只读继承、不重建 Temporal Round；第一次提交将沿用此 Session 并创建 Round 1。</p></div></article>
+            : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           {runnerOpen && <section className="runner-panel" aria-label="Runner 事件"><div className="runner-header"><div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{snapshot.running ? 'Running' : 'Runner'}</strong><span>{modeLabels[mode]}</span></div><button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div><div className="runner-events" role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span>{event.kind}</span><p>{event.message}</p></div>) : <p className="runner-empty">等待运行事件…</p>}</div></section>}
         </section>
         <section className="spec-pane" aria-label="Spec 编辑器"><div className="spec-toolbar"><div className="segmented" aria-label="运行模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={snapshot.running || busy || item === 'loop'} title={item === 'loop' ? 'Loop 尚未通过架构验收' : undefined} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>

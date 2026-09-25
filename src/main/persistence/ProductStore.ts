@@ -219,7 +219,7 @@ export class ProductStore {
     return row && toSessionSummary(row)
   }
 
-  createSession(workspacePath: string, dshSessionId?: string): SessionSummary {
+  createSession(workspacePath: string, dshSessionId?: string, title?: string): SessionSummary {
     if (dshSessionId) {
       const existing = this.getSessionByDshId(dshSessionId)
       if (existing) {
@@ -233,8 +233,8 @@ export class ProductStore {
     const now = new Date().toISOString()
     this.db.prepare(`
       INSERT INTO product_sessions(id, dsh_session_id, workspace_path, title, created_at, updated_at)
-      VALUES (?, ?, ?, 'New Session', ?, ?)
-    `).run(id, dshSessionId ?? null, workspacePath, now, now)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, dshSessionId ?? null, workspacePath, title?.trim() || 'New Session', now, now)
     return this.getSession(id)!
   }
 
@@ -575,11 +575,14 @@ export class ProductStore {
 }
 
 function toSessionSummary(row: SessionRow): SessionSummary {
+  const hasTemporalHistory = Boolean(row.has_temporal_history)
   return {
     id: row.id,
+    ...(row.dsh_session_id ? { dshSessionId: row.dsh_session_id } : {}),
     title: row.title,
     workspacePath: row.workspace_path,
     updatedAt: row.updated_at,
-    hasTemporalHistory: Boolean(row.has_temporal_history)
+    hasTemporalHistory,
+    kind: hasTemporalHistory ? 'temporal' : row.dsh_session_id ? 'legacy' : 'new'
   }
 }

@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import type { BrowserWindow } from 'electron'
-import type { ModelSettings, RoundMode, RoundSummary, RunnerEvent, SessionSummary, WorkspaceSnapshot } from '../shared/contracts'
+import type { ModelSettings, RoundMode, RoundSummary, RunnerEvent, SessionListResult, SessionSummary, WorkspaceSnapshot } from '../shared/contracts'
 import { IPC } from '../shared/contracts'
 import { DshRuntime } from './dsh/DshRuntime'
+import { SessionDiscovery, type DiscoveredDshSession } from './dsh/SessionDiscovery'
+import { historyStateFor, mergeSessions } from './dsh/sessionMerge'
 import { ProductStore } from './persistence/ProductStore'
 import { CredentialVault } from './settings/CredentialVault'
 
@@ -15,6 +17,7 @@ export class WindowController {
   private running = false
   private runnerEvents: RunnerEvent[] = []
   private error: string | undefined
+  private readonly discovery = new SessionDiscovery()
 
   constructor(
     private readonly window: BrowserWindow,
@@ -24,19 +27,32 @@ export class WindowController {
     private readonly releaseSession: (sessionId: string, windowId: number) => void
   ) {}
 
-  async listSessions(path: string): Promise<SessionSummary[]> {
+  async listSessions(path: string): Promise<SessionListResult> {
     const workspacePath = await realpath(path)
-    return this.store.listSessions(workspacePath)
+    const product = this.store.listSessions(workspacePath)
+    let discovered: DiscoveredDshSession[] = []
+    let discoveryError: string | undefined
+    try {
+      discovered = await this.discovery.listByWorkspace(workspacePath)
+    } catch (error) {
+      // Product records stay usable when public ACP discovery fails.
+      discoveryError = error instanceof Error ? error.message : String(error)
+    }
+    return { sessions: mergeSessions(product, discovered, workspacePath), ...(discoveryError ? { discoveryError } : {}) }
   }
 
-  async openSession(path: string, productSessionId?: string): Promise<WorkspaceSnapshot> {
+  async openSession(path: string, sessionId?: string): Promise<WorkspaceSnapshot> {
     if (this.running) throw new Error('当前 Session 正在运行，不能切换。')
     const workspacePath = await realpath(path)
     let nextSession: SessionSummary
-    if (productSessionId) {
-      const saved = this.store.getSession(productSessionId)
-      if (!saved || saved.workspacePath !== workspacePath) throw new Error('Session 不属于这个 Workspace。')
-      nextSession = saved
+    if (sessionId) {
+      const saved = this.store.getSession(sessionId)
+      if (saved) {
+        if (saved.workspacePath !== workspacePath) throw new Error('Session 不属于这个 Workspace。')
+        nextSession = saved
+      } else {
+        nextSession = await this.projectDiscoveredSession(workspacePath, sessionId)
+      }
     } else {
       nextSession = this.store.createSession(workspacePath)
     }
@@ -63,10 +79,12 @@ export class WindowController {
   async getSnapshot(): Promise<WorkspaceSnapshot> {
     const settings = await this.getModelSettings()
     const draft = this.session ? this.store.getDraft(this.session.id) : { draft: '', mode: 'plan' as RoundMode }
+    const rounds = this.session ? this.store.listRounds(this.session.id) : []
     return {
       workspacePath: this.workspacePath,
       session: this.session,
-      rounds: this.session ? this.store.listRounds(this.session.id) : [],
+      rounds,
+      historyState: historyStateFor(this.session, rounds.length),
       draft: draft.draft,
       mode: draft.mode,
       running: this.running,
@@ -201,6 +219,23 @@ export class WindowController {
   private requireSession(): SessionSummary {
     if (!this.session) throw new Error('请先选择 Workspace 和 Session。')
     return this.session
+  }
+
+  /**
+   * First open of a discovered legacy DSH Session creates its product projection.
+   * Membership is verified against public ACP discovery so a fabricated id cannot
+   * create a phantom projection.
+   */
+  private async projectDiscoveredSession(workspacePath: string, dshSessionId: string): Promise<SessionSummary> {
+    const existing = this.store.getSessionByDshId(dshSessionId)
+    if (existing) {
+      if (existing.workspacePath !== workspacePath) throw new Error('该 DSH Session 属于另一个 Workspace。')
+      return existing
+    }
+    const discovered = await this.discovery.listByWorkspace(workspacePath)
+    const match = discovered.find((item) => item.id === dshSessionId)
+    if (!match) throw new Error('未在公共 ACP 列表中找到该 DSH Session，未建立产品投影。')
+    return this.store.createSession(workspacePath, match.id, match.title ?? 'Existing DSH Session')
   }
 
   private async releaseCurrent(): Promise<void> {
