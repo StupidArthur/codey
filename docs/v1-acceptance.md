@@ -1,7 +1,9 @@
 # Temporal Workspace V1 — 验收记录
 
+**最终状态：TODO 7 冻结门全部通过，V1 开发关闭。最新事实、源码提交与安装包指纹见第十节；前文保留为阶段历史，冲突时以第十节为准。**
+
 日期：2026-09-26  
-状态取值：**通过 / 未通过 / 未运行**。证据只记录命令、计数、ID、事件种类与脱敏断言；不含凭证或对话正文。
+状态取值：**通过 / 未通过 / 未运行**。文本证据记录命令、计数、ID、事件种类与脱敏断言；不含凭证或用户原始对话。可视验收截图来自隔离的合成任务。
 
 ## 零、关键技术决定（本轮）
 
@@ -293,3 +295,90 @@ TEMPORAL_TEST_API_KEY=<用户提供> node scripts/probes/installed-app-ui.mjs
 3. **沙盒验证依赖模型在 DSH 内执行产品写好的 wrapper**：模型不执行时检查缺失工件 → 判定失败/不通过，循环继续引导（含明确的重新引用提示）；不存在绕过模型的通道，也不把模型自报的退出码当证据。
 4. **DSH 0.1.7-rc.2 能力边界不变**：无 session modes（Plan 为引导路径）、工具调用无退出码（Verification 由产品自有执行器实跑）——均为实测并沿用 TODO 5 的决定。
 5. `field-equals` 仅支持 `.json`（沿用）；YAML/TOML 等格式由模型判断 + 产物证据覆盖。
+
+## 十、TODO 7 最终关闭（2026-09-26）
+
+**冻结门全部通过，V1 开发关闭。** 源码：[9e16d33](https://github.com/StupidArthur/codey/commit/9e16d33)，接续 `81099cf`；本节为该源码的最终验收记录。范围仅为证据输入关联、整轮 Result、有限回归与安装交付。未升级 DSH/Electron、启动其他 agent 或联系上游。
+
+### A — 检查身份、输入版本与来源
+
+- 沙盒检查具有独立 request id、`.cmd/.exit/.log` 路径、输入 fingerprint 和稳定 check object，并持久化身份。旧 Round/旧请求工件不能满足新请求。
+- 内容和路径集合改变使旧证据失效，包括源码、测试、配置、新增与删除；检查期间再次读取 workspace，输入改变必须重跑。日志和 wrapper 不计任务成果、进展或输入变化。
+- 同一对象的新有效检查替代旧运行，旧通过标历史。自然语言语义仍由模型 coverage 负责，产品校验引用、证据、反证与预算，不恢复逐行正则证明需求。
+- UI 明确来源：**DSH 沙盒检查报告；产品核实结果产物及输入快照**。读取退出码文件不是独立观察子进程退出。产品直接执行的 full-access 检查保留真实 exit/signal。
+
+`loop-decision-gate.mjs` 新增场景覆盖当前通过、源码/新增/删除/配置变化、工件排除、旧身份/异常记录拒绝、执行期间修改强制重跑、新结果恢复有效、历史展示与工件不算用户成果；最终 **67/67 true**。
+
+### B — 实际整轮 Result
+
+RoundEngine 传入全部相关请求、实际输出与执行状态。Vibe 摘要覆盖各次成果并按时间顺序标明后续调整；Plan 表达最终计划与修订，不能冒充实施；Loop 包含实际输出和真实终态。确定性整理不会新增模型调用、工具执行或 Round；去除内部 decision 块；异常时仍保存 Result 并明确回退到请求记录。
+
+无验证时 Verification 明确“本轮未运行验证”；Plan/Vibe Remaining 明确需求完成情况未独立确认，执行结束不是功能验收通过。Changes/Verification/终态由产品事实生成。
+
+`temporal-domain.mjs` 从实际 RoundEngine 收尾覆盖两个 Vibe 请求及实际输出、最终 Plan 输出、Loop 输出、未验证提示、异常回退、SQLite 重开一致性；最终 **53/53 true**。
+
+### C — 安装版 Windows 进程启动修复
+
+首次代码 Loop 已修源码但没有测试工件，诚实停在 blocked，未记为通过。公开 `AclSandbox` API 的系统对照确认：无控制台的 Electron Node GUI 子进程启动受限 cmd，实际退出码 **3221225794 / 0xC0000142**；附着隐藏控制台后同一命令 **exit 0**。这次有真实进程证据，超出此前模型自报错误码的证据边界。
+
+`WindowsRuntimeHost.ts` 生成运行时私有 Node preload，通过子进程环境 `NODE_OPTIONS` 覆盖 Windows Electron runtime 及其 GUI runner 后代。初始化后恢复 ACP 管道，保持原 CLI/runner argv；普通项目 node.exe 跳过初始化。未修改 DSH 包实现、token、ACL 策略或 permission，没有自动提升权限。Koffi 3.3.1 原存在于 DSH 依赖，现声明直接依赖确保打包解析。
+
+`windows-runtime-console.mjs` **10/10 true**：真实核实 argv、输入输出管道、控制台附着且隐藏、完整 GUI runner 链、工作区可写、工作区外写入拒绝且无文件。无需模型或凭证。
+
+### D — 最终实跑命令
+
+| 命令/探针 | 退出码 | 结果 |
+| --- | --- | --- |
+| `pnpm.cmd typecheck` | 0 | 类型通过 |
+| `pnpm.cmd build` | 0 | 三端构建通过，收尾复建 main hash 一致 |
+| Electron Node：`loop-decision-gate.mjs` | 0 | 67/67 |
+| Electron Node：`temporal-domain.mjs` | 0 | 53/53，含可控时钟墙钟边界 |
+| Electron Node：`session-exclusivity.mjs` | 0 | 16/16 |
+| Electron Node：`git-evidence-delta.mjs` | 0 | 20/20 |
+| `node scripts/probes/verify-permissions-impl.mjs`（正常 Windows 权限） | 0 | 24/24，进程树回收及无延迟写入 |
+| `node scripts/probes/windows-runtime-console.mjs`（正常 Windows 权限） | 0 | 10/10 |
+| `pnpm.cmd dist:win` | 0 | 完整依赖打包成功；最终 preload 修订按下一行重新生成安装包 |
+| `pnpm.cmd exec electron-builder --win nsis --x64 --prepackaged release/win-unpacked` | 0 | main 已刷新为最终 bundle，复用未变依赖目录 |
+| 最终安装包 `/S` | 0 | 安装 main 与最终编译 main SHA256 相同 |
+| `node scripts/probes/installed-app-ui.mjs` | 0 | 可见窗口、真实代码 Loop、整轮 Result、应用重启通过 |
+| `node scripts/probes/installed-app-regression.mjs` | 0 | 自动启动安装版，installed-app-e2e 全部五场景 passed true |
+| `node scripts/probes/installed-app-legacy-e2e.mjs` | 0 | 旧 Session 与跨进程恢复 passed true |
+
+本地确定性/系统检查合计 **190 项 true**。PowerShell 的 Electron Node 命令形式：
+
+```powershell
+$env:ELECTRON_RUN_AS_NODE = '1'
+& './node_modules/electron/dist/electron.exe' scripts/probes/temporal-domain.mjs
+```
+
+排障记录：受限工具环境禁止 CIM/taskkill，权限探针两项回收断言失败；正常 Windows 权限复跑 24/24 通过。受限环境打包的 pnpm SQLite 索引访问失败，正常权限构建成功。失败没有包装成通过，表中明确最终运行条件。安装版 DLL 问题按 C 节修复，最终真实代码任务通过。
+
+### E — 最终安装版真实模型验收
+
+Provider/model：`volc-ark / deepseek-v4-flash`，凭证经环境输入及产品配置入口保存。
+
+| 场景 | 脱敏实测 |
+| --- | --- |
+| Plan × 2 | 1 Round / 2 版本，未实施 RELEASE.md；切换模式仍同一 DSH Session |
+| Vibe × 2 / End Round | RELEASE.md、ROLLBACK.md 都存在，2 entries，摘要覆盖两次成果，明确未验证；应用真实重启后 Result 完全相同 |
+| 默认 workspace-write 代码 Loop | calc.cjs 加法修复；tests/run.cjs 字节不变；nonce `.exit=0`，日志匹配固定成功标记；独立磁盘测试 exit 0；Loop completed，UI 来源明确，Remaining 空 |
+| UI 负例 | sealed.md 外部缺失，Loop blocked，不冒充完成，Remaining 点名文件 |
+| 五场景回归 | vibe、loop、loopNegative、loopVerifyWrite、readonly 全部实际运行、无超时、passed true；正例标记匹配；负例文件缺失；read-only 有拒绝记录且无磁盘写入 |
+| 旧 Session | legacy / legacy-unavailable / 0 Round；首次提交原 ID 建立 Round 1，召回未包含在提交中的标记；重启恢复 Round 1，再提交 Round 2，仍原 ID 并召回标记 |
+
+实际 OS 窗口 `Temporal Workspace/22414940`。Runner 展开、收起、mini、侧栏折叠可达、恢复及 Round 切换通过。13 张截图路径在 `docs/evidence/ui/`，本轮刷新其中 10 张。重点：`09-vibe-result.png`、`10-loop-a-result.png`、`11-loop-b-honest-failure.png`。
+
+`verificationCount` 为展示行数，包含“未运行验证”提示时不等于通过数。沙盒工件是报告；真实测试、原测试未改及磁盘结果另有验收断言，没有伪造工件制造正例。
+
+### F — 安装包指纹与非阻塞边界
+
+- 安装包：`release/Temporal Workspace Setup 0.1.0.exe`，**215472289 bytes**。
+- 安装包 SHA256：`9C0EEE6C87C86FD1C677ED06C45A62FA065635EA198B7C20189CBE4693D1153F`。
+- 最终编译与安装 main SHA256：`D18FF9A9958A7E60A7ECD1006C091C7DA982C40FC5540F8E189809E2BA1DEC8A`，收尾重新构建仍相同。
+- 原生历史无公开 transcript API，保持不可用占位，不解析私有 JSONL；resume 使用公开 ACP。
+- 输入采集有界：深度 3、至多 200 文件/4000 项，≤1 MB 文件 hash，其余回退 size/mtime；排除验证工件、依赖、Git 元数据及明确构建输出。不能证明范围外输入或外部依赖没有变化。
+- request id 防误用旧报告，不是不可伪造证明；agent 可写报告。语义覆盖由模型判断，产品核实可观察事实与反证，来源如实标注。
+- 两小时预算以可控时钟验证，未真实挂机两小时。启动页 Session 列表没有独立原生目录选择截图，发现/打开由真实旧 Session 场景覆盖。
+- 凭证值扫描 0 命中，无用户原始会话数据入库到仓库；临时诊断文件未提交。安装包依既有规则保留在 release，不入 Git。
+
+以上是冻结 V1 的明确边界，**不新增开发门，不生成 TODO 8**。TODO 7 固定门全部通过；代码与本记录交付后关闭 V1 开发，后续新功能或优化由用户另行立项。
