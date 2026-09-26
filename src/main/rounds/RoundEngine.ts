@@ -23,6 +23,8 @@ export interface RoundEngineDeps {
   isCancellationRequested?: () => boolean
   /** Persist the DSH session id after a lazy create. */
   onDshSessionCreated?: (dshSessionId: string) => void
+  /** High-level phase timing for performance diagnostics. */
+  onDiagnostic?: (type: string, payload?: unknown) => void
   onRoundChanged?: () => Promise<void> | void
 }
 
@@ -61,16 +63,25 @@ export class RoundEngine {
       throwIfCancelled(this.deps.isCancellationRequested)
       const runtime = await this.deps.ensureRuntime()
       throwIfCancelled(this.deps.isCancellationRequested)
+      const baselineStartedAt = Date.now()
+      this.deps.onDiagnostic?.('evidence.baseline.start', { mode, roundId: round.id })
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      this.deps.onDiagnostic?.('evidence.baseline.end', { mode, roundId: round.id, durationMs: Date.now() - baselineStartedAt })
       throwIfCancelled(this.deps.isCancellationRequested)
       // Plan turns carry product-owned guidance on the SAME DSH session; the
       // stored plan version keeps the user's original spec verbatim.
       const prompt = mode === 'plan' ? planGuidance(input.spec) : input.spec
+      const promptStartedAt = Date.now()
+      this.deps.onDiagnostic?.('model.prompt.start', { mode, roundId: round.id })
       const { text } = await runtime.prompt(prompt)
+      this.deps.onDiagnostic?.('model.prompt.end', { mode, roundId: round.id, durationMs: Date.now() - promptStartedAt, chars: text.length })
       const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
+      const collectStartedAt = Date.now()
+      this.deps.onDiagnostic?.('evidence.collect.start', { mode, roundId: round.id })
       const { bundle } = await this.deps.evidence.collect(
         input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
       )
+      this.deps.onDiagnostic?.('evidence.collect.end', { mode, roundId: round.id, durationMs: Date.now() - collectStartedAt, changedFiles: bundle.changedFiles.length, toolFacts: toolFacts.length })
       this.saveEvidence(round.id, bundle)
       if (mode === 'plan') {
         store.appendPlanVersion(round.id, { id: randomUUID(), submittedSpec: input.spec, planMarkdown: text, createdAt: new Date().toISOString() })
