@@ -176,7 +176,7 @@ function describeChange(bundle: EvidenceBundle, file: string): string {
 
 function runDetail(run: VerificationRun): string {
   if (run.outcome === 'denied') return `denied — ${run.denial ?? 'executor refused the check'}`
-  // Sandbox checks: the product reads artifacts the model produced inside DSH's
+  // Sandbox checks: the product reads artifacts the model produced through the active agent backend's
   // own confined execution. The product factually verified the result artifact
   // (and the input snapshot it was requested against) — it did not directly
   // capture a child-process exit. The source is stated as such, never as a
