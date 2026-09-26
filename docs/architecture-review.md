@@ -1,7 +1,7 @@
 # Temporal Workspace — Architecture Review
 
-Date: 2026-09-26 (updated for TODO 5)  
-Status: **implementation accepted except packaging/runtime gates listed below**
+Date: 2026-09-26 (final TODO 7 closure)
+Status: **V1 accepted and development closed**
 
 ## Architectural ownership
 
@@ -35,9 +35,14 @@ Electron Main  (one WindowController per BrowserWindow)
 3. One window owns one Session. Exclusivity is enforced by a SQLite row lease (`session_leases`) so it holds across windows **and across app processes**, not only inside one main process.
 4. Loop defaults: 16 internal continuations, two hours wall clock, three consecutive no-progress cycles, two same-error retries.
 5. Legacy DSH history is read-only and inherited; Temporal Round 1 starts with the first submission through this product, on the existing DSH Session.
-6. Pinned pair: `@deepseek-ai/dsh@0.1.7-rc.2`, `@deepseek-ai/dsh-sdk-client@0.1.7-rc.2`, `@agentclientprotocol/sdk@1.4.0`.
+6. Runtime uses public ACP (`dsh --profile acp`), not `HarnessClient` / SDK profile. `@deepseek-ai/dsh@0.1.7-rc.2` and `@agentclientprotocol/sdk@1.4.0` are pinned in the accepted build.
+7. Product persistence uses Electron built-in `node:sqlite` / `DatabaseSync`; `better-sqlite3` was removed after its Electron 44 native finalizer crash was reproduced.
+8. Plan is a product `PlanGuidance` path, not a DSH session mode; Session sandbox preset remains the permission authority.
+9. Loop completion is **model-assessed and product-validated**: model judges semantic coverage of the complete natural-language Spec; product validates cited evidence, workspace input fingerprint, known counter-evidence, budget and terminal status. Semantic relevance is not formally proven by a Markdown parser, and product evidence is not a formal proof of arbitrary semantics.
+10. Under `workspace-write`, tests/typecheck/build run through product-generated nonce wrappers inside the DSH sandbox; the product reads the matching artifacts and checks the input fingerprint.
+11. Result summarizes the whole Round. Windows V1 passed final installed-app acceptance.
 
-## Execution path decision (phase A)
+## Execution path decision (original design divergence; final ACP path)
 
 The SDK `sdk` profile cannot resume a persisted session: its JSON-RPC server always calls `ctx.agents.create(...)` and never `agents.resume(...)`, so a known persisted id fails with `session "<id>" already exists`. The public SDK wire exposes no resume method (see `docs/dsh-upstream-resume-report.md`, kept unchanged as the upstream gap report).
 
@@ -50,19 +55,21 @@ Because the public **ACP** `session/resume` *does* inherit context across proces
 
 This is a deliberate divergence from the original HarnessClient/SDK single-client design. It uses only public interfaces, touches no private files or `node_modules`, and keeps new and resumed sessions on one transport so context never has to be replayed into the prompt.
 
-## Acceptance gates
+The final installed Windows build also verified the GUI-child console workaround for `0xC0000142`; `WindowsRuntimeHost` installs a runtime-scoped hidden console preload while preserving ACP pipes and argv. The isolation and installed-app evidence are recorded in TODO 7 of `docs/v1-acceptance.md`.
 
-| Gate | Required evidence | Current result |
+## Final acceptance status
+
+All V1 gates are closed. Detailed final commands, real installed-app evidence and frozen limitations are recorded in `docs/v1-acceptance.md`, TODO 7 closure section. The table below is the final evidence map; it does not identify remaining gates.
+
+| Gate | Accepted evidence | Final status |
 | --- | --- | --- |
-| G0 — package closure | Reproducible install of matched DSH + SDK | Passed locally with pinned lockfile |
+| G0 — package closure | Reproducible install of matched DSH + ACP | Passed with pinned lockfile |
 | G1 — runtime | Initialize, first/sequential prompt, cross-process resume, notifications, close | **Passed on public ACP** (real credential, 2026-09-25): new session, sequential prompt with inherited context, cross-process `session/resume`, file write, tool/thought/message updates. SDK-resume remains an upstream gap and is no longer on the execution path |
 | G2 — discovery/history | Public API lists sessions by canonical cwd; legacy history is explicit | Passed: ACP `session/list(cwd)` with pagination, product/discovery merge and dedupe; legacy history is unreadable by public API and shown as the read-only `Historical transcript unavailable` placeholder, never faked |
 | G3 — persistence | Migration, draft revision race, restart reconciliation, cross-process lease | **Passed by `scripts/probes/temporal-domain.mjs`**: migrations, default permission, draft revision clear-only-if-unchanged, execution start/finish ordering, interrupted reconcile, evidence/result projection, same-process and cross-process lease block/release/crash-TTL |
-| G4 ? semantics | Natural-language Plan/Vibe/Loop, budgets, evidence validity | TODO 7: temporal-domain and loop-decision-gate cover model decisions, nonce/input binding, whole-round Result and truthful terminal states; final installed-app evidence is in docs/v1-acceptance.md |
-| G5 ? result trust | Collected facts, explicit provenance and truthful terminal reason | TODO 7: empty verification is explicitly stated; stale passes are historical; sandbox reports identify artifact/input validation; model prose cannot fabricate product verification |
-| G6 ? desktop | Typecheck, build, Windows install and application restart | Final TODO 7 commands, installed scenarios and screenshots are recorded in docs/v1-acceptance.md |
-
-Passing a build is not acceptance of a gate that requires runtime behavior.
+| G4 — semantics | Natural-language Plan/Vibe/Loop, budgets, evidence validity | **Passed:** TODO 7 domain and decision probes cover model decisions, nonce/input binding, whole-round Result and truthful terminal states; final installed-app evidence is in docs/v1-acceptance.md |
+| G5 — result trust | Collected facts, explicit provenance and truthful terminal reason | **Passed:** empty verification is explicit; stale passes are historical; sandbox reports identify artifact/input validation; model prose cannot fabricate product verification |
+| G6 — desktop | Typecheck, build, Windows install and application restart | **Passed:** final TODO 7 commands, installed scenarios and screenshots are recorded in docs/v1-acceptance.md |
 
 ## Implementation notes
 
@@ -74,7 +81,7 @@ Passing a build is not acceptance of a gate that requires runtime behavior.
 - **Crash honesty.** A Round that is `runtime_active` at startup is reconciled to `interrupted`, never `completed`. Terminal writes clear `runtime_active` in the same statement, and the engine tolerates an already-inactive runtime.
 - **Draft race.** Draft writes bump a revision; after a submit, the store clears the draft only if it still matches the submitted revision, so edits made while running survive a restart.
 
-## Known limitations / follow-ups
+## Frozen V1 boundaries
 
 - Natural-language coverage and semantic relevance remain model-assessed. Product validation checks observable evidence and contradictions; it does not formally prove arbitrary task semantics. This is the frozen V1 boundary.
 - Permission presets apply to both DSH and product verification. Product shell execution requires explicit danger-full-access; read-only supports confined builtin reads. Under workspace-write, tests/typecheck/build use product-generated nonce wrappers executed by DSH in its sandbox, then product verification reads matching result artifacts and checks their input fingerprint. This requires no automatic permission escalation. The UI labels these as DSH sandbox reports, not independently observed child-process exits.
@@ -87,4 +94,4 @@ Verification results are bound to request-specific artifact paths and a content-
 
 Result summaries deterministically include actual outputs across Vibe requests, the final Plan version, or the Loop output and terminal. They do not invoke the model again, run tools or create a new Round. No verification is explicitly stated, and request transport completion is not functional acceptance. Historical Result projections remain persisted without reconstructing legacy DSH transcripts.
 
-Final command results and installer evidence are in docs/v1-acceptance.md, TODO 7 closure section. Once its frozen gates pass, V1 development is closed; optional improvements require separate user authorization.
+Final command results and installer evidence are in docs/v1-acceptance.md, TODO 7 closure section. Its frozen gates passed, V1 development is closed, and no further V1 gate is pending. New work requires a separate user decision.

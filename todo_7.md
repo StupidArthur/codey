@@ -1,5 +1,7 @@
 # TODO 7 — V1 最终收尾与开发关闭
 
+> **Historical / completed:** TODO 7 已完成，V1 开发关闭。本文是关闭过程的任务记录；最终实现事实见 `docs/v1-acceptance.md` 和 `docs/architecture-review.md`。
+
 ## 0. 任务性质与结束规则
 
 你是唯一执行 agent。本任务从 `81099cf` 开始，沿用 main-only 工作方式，不启动其他 agent。

@@ -1,5 +1,7 @@
 # TODO 1 — DSH 旧 Session P0 闭环
 
+> **Historical / completed:** 这是已完成阶段的任务记录；V1 已于 TODO 7 验收关闭。不得把本单的旧 HarnessClient 方案当作当前架构。请读 `docs/architecture-review.md` 与 `docs/v1-acceptance.md` 获取最终事实。
+
 本任务由**一个 agent 独立、按顺序**完成。不要再委派其他 agent。先解决旧 Session 的发现与恢复，再收敛正式 Runtime 和 Windows 打包；本单不实现 Result Builder 或 Loop。
 
 ## 先读，再动代码

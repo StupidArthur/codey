@@ -1,5 +1,7 @@
 # TODO 6 — 回到产品目标，完成 Plan / Vibe / Loop 的真实语义
 
+> **Historical / completed:** 本单为已完成的阶段任务；V1 已验收关闭。本文中的早期建议（包括 DSH 原生 Plan Mode）已被最终产品 guidance path 取代，见 `docs/architecture-review.md`。
+
 ## 目标与优先级
 
 本单交给**同一个 agent 连续完成**，不要委派其他 agent。基线 `e7fd850`，开始前核对实际 HEAD、工作区和已有改动。保留已成立的桌面、ACP Session、SQLite、草稿、版本与对话投影，不推倒重建。

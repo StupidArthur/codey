@@ -5,6 +5,16 @@
 > 定位：Windows 优先，同时支持 macOS  
 > 状态：已定稿
 
+> **V1 最终实现状态（2026-09-26）**：V1 已验收关闭。下文原始技术方案与最终事实冲突的部分均标记为 **historical / superseded**，保留用于解释决策，不是当前实现要求。当前事实以 `docs/v1-acceptance.md` TODO 7、`docs/architecture-review.md` 和代码为准。
+>
+> 当前栈：Electron + React + TypeScript + Vite；公开 ACP (`dsh --profile acp`) 统一负责新建、恢复、prompt 和 `session/list(cwd)`；Electron `node:sqlite` / `DatabaseSync` 持久化；一个窗口管理一个 Session；Plan 使用产品侧 guidance path；Loop completion 为 **model-assessed and product-validated**；workspace-write 验证由 nonce wrapper 在 DSH sandbox 中执行并校验 input fingerprint；Result 覆盖整个 Round；Windows 安装版已验收。
+>
+> 方案分歧原因：SDK resume 缺口由公开 ACP `session/resume` 解决；`better-sqlite3` 在 Electron 44 的原生析构 abort 已被隔离复现，故改用内置 SQLite；DSH 公开 ACP 未提供产品可用 session mode，故 Plan 用产品 guidance path 实现；Windows GUI 子进程的 `0xC0000142` 通过 `WindowsRuntimeHost` 的 runtime-scoped 隐藏 console 初始化处理。以上均有最终验收证据。
+
+## 历史技术方案（historical / superseded）
+
+以下详细方案描述 V1 开发前的选型与候选实现。与本文开头“V1 最终实现状态”冲突的内容仅保留为设计历史，不能用于当前实现判断。
+
 ---
 
 ## 1. 结论
@@ -22,7 +32,7 @@ SQLite
 Electron IPC
 pnpm
 electron-builder
-@deepseek-ai/dsh-sdk-client / HarnessClient
+公开 ACP (`dsh --profile acp`)
 ```
 
 核心原则：
@@ -33,7 +43,7 @@ electron-builder
 - Electron Main Process 即本地 Backend。
 - Renderer 只负责 UI、交互和展示。
 - 所有 DSH 进程、Session、Loop、Result Builder、文件系统、SQLite 操作都在 Main Process。
-- DSH 通过官方 TypeScript SDK `HarnessClient` 接入。
+- DSH 通过公开 ACP 接入；`session/new` / `session/resume` / `session/prompt` 为统一执行路径，`session/list(cwd)` 用于发现。
 - Windows 为第一优先平台，macOS 为第二平台。
 - V1 不使用 Tauri，不引入 Rust 后端。
 
@@ -747,11 +757,13 @@ Result Builder 和 Loop Evaluator 共用这些 evidence。
 
 V1 本地产品数据使用 SQLite。
 
-建议库：
+原始设计（已被取代）：
 
 ```text
 better-sqlite3
 ```
+
+最终实现使用 Electron 内置 `node:sqlite` / `DatabaseSync`。Electron 44 下 `better-sqlite3` 的原生析构崩溃已通过独立复现确认；迁移及最终验收见 `docs/v1-acceptance.md`。
 
 数据库只保存产品自己的信息，不复制 DSH 原生 conversation history。
 

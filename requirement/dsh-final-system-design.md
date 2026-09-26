@@ -4,6 +4,23 @@
 > 日期：2026-09-25  
 > 范围：桌面 GUI、前端交互、应用后端、DeepSeek Harness（DSH）集成、Plan / Vibe / Loop、Round / Result、持久化与恢复。
 
+> **V1 最终实现状态（2026-09-26）**：V1 已验收关闭。本文最初记录的方案中，凡与本段冲突者均为**已被取代的原始设计**，只保留作决策历史；当前事实以 `docs/v1-acceptance.md` 的 TODO 7 最终关闭记录、`docs/architecture-review.md` 和代码为准。
+>
+> - Runtime transport：公开 ACP，`dsh --profile acp`；新建 `session/new`，恢复 `session/resume`，每轮 `session/prompt`；发现使用 `session/list(cwd)`。产品不走 `HarnessClient` / `sdk` profile。
+> - Persistence：Electron 内置 `node:sqlite` / `DatabaseSync`。`better-sqlite3` 在 Electron 44 下的原生析构崩溃已复现，故不再使用。
+> - Window / Session：一个窗口管理一个 Session；同一 Session 通过租约保持独占。
+> - Legacy history：没有公开 transcript 读取接口；显示 `Historical transcript unavailable`，不解析私有 JSONL。
+> - Plan：产品侧 `PlanGuidance` guidance path；不是 DSH 原生 session mode。权限由 Session sandbox preset 控制。
+> - Loop：**model-assessed and product-validated**。模型判断自然语言 Spec 语义覆盖；产品校验引用证据、workspace input fingerprint、known counter-evidence、预算和终态。Markdown parser 不正式证明语义相关性，产品证据也不构成任意语义的形式化证明。
+> - workspace-write 下的 tests/typecheck/build 使用产品生成的 nonce wrapper，在 DSH sandbox 中运行；产品读取匹配工件并校验 input fingerprint。
+> - Result 汇总整个 Round，不只是最后一条回复。Windows V1 已通过真实安装版验收。
+
+下文中的早期集成方案、验收计划和方案图如与上述状态冲突，均按 **historical / superseded** 阅读。
+
+## 历史设计记录（historical / superseded）
+
+本节以下正文是 V1 开发前/开发中的设计依据和备选方案，不应作为当前实现要求；最终行为以本文开头的实现状态及验收文档为准。
+
 ---
 
 ## 1. 产品定义
@@ -608,7 +625,7 @@ Loop 只能因为以下理由结束：
 3. 有与本次任务匹配的 Verification evidence；
 4. 当前 workspace 没有已知会推翻完成结论的问题。
 
-**Loop completion is evidence-based, not model-declared.** 模型的完成声明只能作为待核验的输入，不能单独触发 `completed`。代码任务按以下顺序选择与本次修改相关、且项目实际存在的验证：用户指定的验证 → 相关 tests → typecheck / compile → build → lint（项目要求时）→ 必要的行为检查。不要求每次执行所有验证，但所选的必要验证必须通过。
+**Loop completion is model-assessed and product-validated.** 模型判断完整自然语言 Spec 的语义覆盖；产品验证 cited evidence、workspace input fingerprint、known counter-evidence、budget 和 terminal status。workspace-write 下相关 tests/typecheck/build 通过产品生成的 nonce wrapper 在 DSH sandbox 内运行，产品读取匹配工件并校验 input fingerprint。Markdown parser 不正式证明 semantic relevance，product evidence 也不是对任意语义的形式化证明。模型一句“完成了”不能单独触发 `completed`。
 
 证据不足时不得判定 `completed`；应根据剩余工作和停止条件进入 `continue`、`blocked`、`budget_exhausted` 或 `failed`。最终 Result 必须明确显示实际停止状态和原因，尤其不能将 `budget_exhausted` 包装成完成。
 

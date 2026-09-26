@@ -1,5 +1,7 @@
 # TODO 2 — 核准 DSH 上游报告的复现证据
 
+> **Historical / completed:** 这是已完成阶段的任务记录；其调查描述 SDK resume 缺口，但产品当前统一走公开 ACP，V1 已关闭。最终事实见 `docs/architecture-review.md` 与 `docs/v1-acceptance.md`。
+
 本任务由**一个 agent 独立完成**，不要再委派 agent。目标是让面向 DSH 上游的报告与可运行探针严格一致。只处理证据和表述，不启动 Runtime、Result Builder、Loop 或 Windows 打包开发。
 
 ## 先读

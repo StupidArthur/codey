@@ -1,5 +1,7 @@
 # P0 Acceptance — DSH 旧 Session 闭环
 
+> **Historical / superseded:** 本文是 ACP/SDK 选型前的阶段验收记录。其“下一阶段切换 HarnessClient”等建议已被后续实现取代；V1 统一使用公开 ACP，且已于 TODO 7 验收关闭。当前事实见 `docs/v1-acceptance.md` 与 `docs/architecture-review.md`。
+
 日期：2026-09-25  
 范围：`todo_1.md` 阶段 1–4。状态仅取 **通过 / 未通过 / 未运行**。  
 证据原则：只记录命令、计数、ID 与脱敏断言；不含凭证或对话正文。

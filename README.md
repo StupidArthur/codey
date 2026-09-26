@@ -1,6 +1,8 @@
 # Temporal Workspace
 
-Electron + React desktop shell for DeepSeek Harness (DSH). The repository is in the architecture and first-integration stage; the product design lives in `requirement/`.
+> **V1 status: accepted and development closed.** Current implementation facts and frozen boundaries are recorded in [`docs/v1-acceptance.md`](docs/v1-acceptance.md) and [`docs/architecture-review.md`](docs/architecture-review.md).
+
+Electron + React desktop application for DeepSeek Harness (DSH). V1 is accepted and closed; the final design and implementation record lives in `requirement/` and `docs/`.
 
 ## Current structure
 
@@ -22,10 +24,9 @@ pnpm.cmd build
 pnpm.cmd dev
 ```
 
-`@deepseek-ai/dsh` and `@deepseek-ai/dsh-sdk-client` are pinned together at `0.1.7-rc.2` (the newest published `next` release on 2026-09-25). The Windows installer command is `pnpm.cmd dist:win`. The builder keeps dependency files outside ASAR so the SDK can spawn the packaged DSH entry through Electron's Node mode.
+`@deepseek-ai/dsh` is pinned at `0.1.7-rc.2`; the runtime and discovery use public ACP (`dsh --profile acp`). Persistence uses Electron's built-in `node:sqlite` / `DatabaseSync`. The Windows installer command is `pnpm.cmd dist:win`; the installed Windows V1 passed acceptance.
 
 ## Integration status
 
-- The SDK initialization handshake has been exercised with the bundled npm package. A model turn still requires a configured credential and an end-to-end test.
-- The current public SDK has no Session list or history-read method. `SessionDiscovery` exposes this gap explicitly. Existing DSH sessions are not yet discoverable from the launcher, and imported history cannot yet be rendered. A public ACP listing adapter and a public history-read route need verification before claiming those features.
-- Plan and Vibe currently store the raw DSH final response. Loop, Evidence Collector, and Result Builder are not yet wired; Loop submission fails explicitly rather than reporting a fabricated result.
+- Session discovery uses public ACP `session/list(cwd)`. Existing DSH transcripts remain unavailable through a public read API; the product displays `Historical transcript unavailable` and never parses private JSONL. Session resume uses ACP `session/resume`.
+- Plan is a product guidance path; Loop completion is model-assessed and product-validated; Results summarize the whole Round. Final behavior and known boundaries are recorded in the acceptance document.

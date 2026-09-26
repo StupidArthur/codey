@@ -1,5 +1,11 @@
 # DSH 集成现状与公开接口缺口
 
+> **最终状态（2026-09-26）：V1 已验收关闭。** 产品执行与发现统一使用公开 ACP：`dsh --profile acp`、`session/new`、`session/resume`、`session/prompt`、`session/list(cwd)`。旧 transcript 仍无公开读取接口，V1 按约定显示 `Historical transcript unavailable`。下方 SDK resume 失败是已放弃执行路径的调查证据，不代表产品有待解决 gate。最终产品状态见 `docs/v1-acceptance.md` TODO 7。
+
+## 历史集成调查（historical evidence; final implementation supersedes SDK path）
+
+以下记录保留 SDK resume 缺口的调查证据及 ACP 选型原因。SDK 路径已不是产品执行路径，V1 已关闭。
+
 日期：2026-09-25  
 供 GitHub 审阅使用；结论针对仓库锁定的 `@deepseek-ai/dsh@0.1.7-rc.2`、`@deepseek-ai/dsh-sdk-client@0.1.7-rc.2` 与 `@agentclientprotocol/sdk@1.4.0`，不推断其他版本。
 
@@ -82,7 +88,7 @@ node scripts/probes/dsh-runtime-impl.mjs
 ELECTRON_RUN_AS_NODE=1 <electron> scripts/probes/temporal-domain.mjs
 ```
 
-已在当前 Windows 环境通过 `typecheck`、`build`；公开 ACP 下 DSH 初始化握手、首次/连续 prompt、跨进程 resume、事件、idle 与关闭通过；ACP discovery 隔离/分页/错误路径通过；产品域不变量（含跨进程租约、证据 cross-check、Loop 预算）由 `temporal-domain.mjs` 全绿。**SDK 跨进程 resume 仍失败（上游缺口）；安装包内启动与旧 History 的实际验收见 `docs/v1-acceptance.md`。**
+本调查记录形成时，Windows `typecheck` / `build`、公开 ACP 握手和恢复、ACP discovery 隔离/分页、产品域不变量均通过。SDK 跨进程 resume 当时仍失败（上游缺口），因此转用 ACP。后续安装包内启动和旧 Session 实际验收已在 `docs/v1-acceptance.md` 完成并关闭。
 
 ## 希望审阅者帮助确认
 
@@ -90,4 +96,4 @@ ELECTRON_RUN_AS_NODE=1 <electron> scripts/probes/temporal-domain.mjs
 2. 推荐如何在 SDK 执行进程旁使用 ACP `session/list(cwd)`，并保证它们看到同一持久 Session 集合？是否有更合适的公开 discovery 接口？
 3. 已核实：`DeepSeekHarness.session(existingId).run()` **不会**从磁盘恢复旧上下文——`sdk` profile 的 JSON-RPC 服务端只 `create` 不 `resume`，已持久化 ID 会报 `already exists`。本产品已改为通过公开 ACP `session/resume` 执行旧 Session（见 `docs/architecture-review.md`）。请确认：SDK wire 是否有计划增加公开 resume，或是否有公开的 resume 开关；若暂无，我们继续以 ACP 作为受支持的公开路径。
 
-在这些问题得到可运行验证前，仓库会继续保留显式缺口，不解析 DSH 私有存储，也不展示伪造历史。
+历史注：上游问题仍作为调查材料保留；产品不等待这些问题的答复。V1 不解析 DSH 私有存储，也不展示伪造历史。

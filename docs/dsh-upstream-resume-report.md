@@ -1,5 +1,7 @@
 # Upstream report — SDK `sdk` profile cannot resume a persisted session
 
+> **Historical / superseded for product architecture:** this report documents the SDK resume limitation that motivated the switch to public ACP. Product execution now uses `dsh --profile acp` and public `session/resume`; V1 is accepted and closed. This file remains evidence for upstream compatibility history, not a pending product gate.
+
 Status: **blocking** for any client that must continue an existing session.
 Reported: 2026-09-25
 

@@ -1,5 +1,7 @@
 # Temporal Workspace — V1 开发 Plan List
 
+> **Historical / superseded:** 本文是 V1 开发前任务计划，不是当前 TODO 或开发状态。V1 已按 `docs/v1-acceptance.md` TODO 7 验收关闭；计划中未勾选的事项不表示当前仍待开发，部分方案已被公开 ACP、产品 Plan guidance 和最终安装验收取代。
+
 > 基于《Temporal Workspace — 最终系统设计文档》执行。  
 > 原则：先打通最小闭环，再做模式语义，再做 Loop 与结果可信度，最后做恢复与打磨。
 
