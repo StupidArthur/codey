@@ -70,11 +70,29 @@ export interface EvidenceSummary {
   outcome: 'passed' | 'failed' | 'observed'
   provenance: 'tool' | 'user' | 'model'
   observedAt: string
+  /** Command evidence: the real command that ran and its exit code. */
+  command?: string
+  exitCode?: number | null
+  /** Files the check verified (relative); empty means workspace-scoped. */
+  targets?: string[]
+  /** Required-spec item ids this evidence covers. */
+  covers?: string[]
+  /** False once a target changed or the artifact disappeared after the run. */
+  valid?: boolean
+  turn?: number
+  toolCallId?: string
 }
 
 export interface LoopTerminalSummary {
   status: 'completed' | 'blocked' | 'budget_exhausted' | 'failed'
   reason: string
+}
+
+export interface RequirementCoverageSummary {
+  id: string
+  original: string
+  status: 'satisfied' | 'pending' | 'unknown'
+  evidenceIds: string[]
 }
 
 export interface ResultSummary {
@@ -83,6 +101,8 @@ export interface ResultSummary {
   verification: string[]
   remaining: string[]
   loopTerminal?: LoopTerminalSummary
+  /** Per-requirement coverage when the round ran through the Loop gate. */
+  coverage?: RequirementCoverageSummary[]
   createdAt: string
 }
 

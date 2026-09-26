@@ -51,6 +51,13 @@ export interface EvidenceRecord {
   outcome: 'passed' | 'failed' | 'observed'
   provenance: 'tool' | 'user' | 'model'
   observedAt: string
+  command?: string
+  exitCode?: number | null
+  targets?: string[]
+  covers?: string[]
+  valid?: boolean
+  turn?: number
+  toolCallId?: string
 }
 
 export interface ResultDocument {
@@ -63,6 +70,12 @@ export interface ResultDocument {
     status: 'completed' | 'blocked' | 'budget_exhausted' | 'failed'
     reason: string
   }
+  coverage?: Array<{
+    id: string
+    original: string
+    status: 'satisfied' | 'pending' | 'unknown'
+    evidenceIds: string[]
+  }>
 }
 
 export interface SessionLease {
@@ -171,6 +184,15 @@ const migrations = [
   `
     ALTER TABLE product_sessions ADD COLUMN permission TEXT NOT NULL DEFAULT 'workspace-write'
       CHECK (permission IN ('read-only', 'workspace-write', 'danger-full-access'));
+  `,
+  `
+    ALTER TABLE round_evidence ADD COLUMN command TEXT;
+    ALTER TABLE round_evidence ADD COLUMN exit_code INTEGER;
+    ALTER TABLE round_evidence ADD COLUMN targets TEXT;
+    ALTER TABLE round_evidence ADD COLUMN covers TEXT;
+    ALTER TABLE round_evidence ADD COLUMN valid INTEGER;
+    ALTER TABLE round_evidence ADD COLUMN turn INTEGER;
+    ALTER TABLE round_evidence ADD COLUMN tool_call_id TEXT;
   `
 ] as const
 
@@ -479,24 +501,45 @@ export class ProductStore {
 
   saveEvidence(roundId: string, evidence: EvidenceRecord): void {
     this.stmt(`
-      INSERT INTO round_evidence(id, round_id, kind, label, detail, outcome, provenance, observed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO round_evidence(id, round_id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET round_id = excluded.round_id, label = excluded.label,
         detail = excluded.detail, outcome = excluded.outcome, provenance = excluded.provenance,
-        observed_at = excluded.observed_at
+        observed_at = excluded.observed_at, command = excluded.command, exit_code = excluded.exit_code,
+        targets = excluded.targets, covers = excluded.covers, valid = excluded.valid,
+        turn = excluded.turn, tool_call_id = excluded.tool_call_id
     `).run(evidence.id, roundId, evidence.kind, evidence.label, evidence.detail,
-      evidence.outcome, evidence.provenance, evidence.observedAt)
+      evidence.outcome, evidence.provenance, evidence.observedAt,
+      evidence.command ?? null, evidence.exitCode ?? null,
+      evidence.targets ? JSON.stringify(evidence.targets) : null,
+      evidence.covers ? JSON.stringify(evidence.covers) : null,
+      evidence.valid === undefined ? null : (evidence.valid ? 1 : 0),
+      evidence.turn ?? null, evidence.toolCallId ?? null)
   }
 
   listEvidence(roundId: string): EvidenceRecord[] {
     const rows = this.stmt(`
-      SELECT id, kind, label, detail, outcome, provenance, observed_at
+      SELECT id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id
       FROM round_evidence WHERE round_id = ? ORDER BY observed_at, id
     `).all(roundId) as Array<{ id: string; kind: EvidenceRecord['kind']; label: string; detail: string;
-      outcome: EvidenceRecord['outcome']; provenance: EvidenceRecord['provenance']; observed_at: string }>
-    return rows.map((row) => ({ id: row.id, kind: row.kind, label: row.label,
-      detail: row.detail, outcome: row.outcome, provenance: row.provenance,
-      observedAt: row.observed_at }))
+      outcome: EvidenceRecord['outcome']; provenance: EvidenceRecord['provenance']; observed_at: string;
+      command: string | null; exit_code: number | null; targets: string | null; covers: string | null;
+      valid: number | null; turn: number | null; tool_call_id: string | null }>
+    return rows.map((row) => {
+      const record: EvidenceRecord = {
+        id: row.id, kind: row.kind, label: row.label,
+        detail: row.detail, outcome: row.outcome, provenance: row.provenance,
+        observedAt: row.observed_at
+      }
+      if (row.command !== null) record.command = row.command
+      if (row.exit_code !== null) record.exitCode = row.exit_code
+      if (row.targets !== null) record.targets = JSON.parse(row.targets) as string[]
+      if (row.covers !== null) record.covers = JSON.parse(row.covers) as string[]
+      if (row.valid !== null) record.valid = row.valid === 1
+      if (row.turn !== null) record.turn = row.turn
+      if (row.tool_call_id !== null) record.toolCallId = row.tool_call_id
+      return record
+    })
   }
 
   saveResult(roundId: string, document: ResultDocument): void {

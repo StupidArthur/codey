@@ -1,6 +1,10 @@
 import type { ExecutionOutcome, LoopTerminalSummary, RunnerEvent } from '../../shared/contracts'
 import type { DshRuntime } from '../dsh/DshRuntime'
-import type { EvidenceBundle, EvidenceCollector, VerificationClaim } from '../evidence/EvidenceCollector'
+import type { EvidenceCollector } from '../evidence/EvidenceCollector'
+import type { EvidenceBundle, ToolCallFact, VerificationRequest, VerificationRun, VerificationExecutorFn } from '../evidence/evidence'
+import { LoopEvaluator, type CheckRequest, type LoopDecision, type WorkspaceHints } from './LoopEvaluator'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 export interface LoopBudget {
   maxContinuations: number
@@ -28,103 +32,133 @@ export interface LoopRunResult {
   finalResponse: string
   evidence: EvidenceBundle
   continuations: number
+  decision?: LoopDecision
 }
 
-const BLOCKED = /blocked|need(?:s|ed)? (?:your |user )?(?:input|approval|permission|decision)|cannot proceed|unable to continue/i
+/** Structured blocker marker the model is instructed to emit; not a broad regex. */
+const BLOCKED_MARKER = /^\[BLOCKED\]/m
 
 /**
- * Evidence-gated loop. Completion is never taken from the model's own claim:
- * a turn may only complete when real verification evidence passed, the
- * response does not report a block, and there is no unresolved error. The
- * remaining gaps become the next continuation prompt. Budgets stop the loop.
+ * Evidence-gated loop with a four-condition completion gate. Completion is
+ * never taken from the model's claim or from DSH tool completion: every
+ * required item must be backed by currently-valid, relevant verification that
+ * the product's own executor ran to exit 0, with no known counter-evidence.
+ * The remaining gaps and workspace issues become the next continuation prompt.
+ * Budgets stop the loop.
  */
 export class LoopController {
+  private readonly evaluator = new LoopEvaluator()
+
   constructor(
     private readonly runtime: DshRuntime,
     private readonly collector: EvidenceCollector,
     private readonly budget: LoopBudget = DEFAULT_LOOP_BUDGET,
     /** Wall-clock source; injectable so budget boundaries are testable without waiting. */
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    private readonly verify?: VerificationExecutorFn
   ) {}
 
   async run(input: LoopRunInput): Promise<LoopRunResult> {
     const startedAt = this.now()
     const errorCounts = new Map<string, number>()
-    let changedSoFar = new Set<string>()
-    const accumulatedChanges = new Set<string>()
-    const accumulatedNewFiles = new Set<string>()
-    const accumulatedVerification: VerificationClaim[] = []
+    const startSnapshot = await this.collector.baseline(input.workspacePath)
+    const changedTurnByFile = new Map<string, number>()
+    const hints = await workspaceHints(input.workspacePath)
+    let prevSnapshot = startSnapshot
+    let allRuns: VerificationRun[] = []
     let noProgress = 0
     let continuations = 0
+    let turn = 0
     let finalResponse = ''
     let prompt = input.rootSpec
+    let failure: string | undefined
 
     for (;;) {
-      const baseline = await this.collector.baseline(input.workspacePath)
-      let failure: string | undefined
+      turn += 1
+      failure = undefined
       let text = ''
       try {
         text = (await this.runtime.prompt(prompt)).text
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error)
       }
-      const outcome: ExecutionOutcome = failure ? 'failed' : 'completed'
       const events = input.takeEvents()
-      const evidence = await this.collector.collect(input.workspacePath, baseline, events, outcome)
-
-      // Accumulate across continuations so the Result reflects every file the
-      // loop touched, not only the final turn. Completion decisions below still
-      // read the current turn's evidence.
-      for (const file of evidence.changedFiles) accumulatedChanges.add(file)
-      for (const file of evidence.newFiles) accumulatedNewFiles.add(file)
-      for (const claim of evidence.verification) accumulatedVerification.push(claim)
-      const cumulative: EvidenceBundle = {
-        ...evidence,
-        changedFiles: [...accumulatedChanges],
-        newFiles: [...accumulatedNewFiles],
-        verification: dedupeClaims(accumulatedVerification)
-      }
+      const toolFacts = (this.runtime.takeToolFacts?.() ?? []).map((fact: ToolCallFact) => ({ ...fact, turn }))
+      const outcome: ExecutionOutcome = failure ? 'failed' : 'completed'
+      const { bundle, snapshot } = await this.collector.collect(
+        input.workspacePath, startSnapshot, prevSnapshot, events, toolFacts, outcome
+      )
+      prevSnapshot = snapshot
+      for (const file of bundle.turnChangedFiles) changedTurnByFile.set(file, turn)
+      bundle.verification = allRuns
 
       if (failure) {
         const count = (errorCounts.get(failure) ?? 0) + 1
         errorCounts.set(failure, count)
         if (count >= this.budget.maxSameError) {
-          return this.finish('failed', `Same error repeated ${count} times: ${truncate(failure)}`, finalResponse, cumulative, continuations)
+          return this.finish('failed', `Same error repeated ${count} times: ${truncate(failure)}`, finalResponse, bundle, continuations)
         }
       } else {
         finalResponse = text
-        const changed = new Set(evidence.changedFiles)
-        const progressed = evidence.verification.some((claim) => claim.outcome === 'passed') ||
-          [...changed].some((file) => !changedSoFar.has(file))
-        changedSoFar = changed
-        noProgress = progressed ? 0 : noProgress + 1
+        if (BLOCKED_MARKER.test(text)) {
+          return this.finish('blocked', 'The model reported that it needs user input to continue.', finalResponse, bundle, continuations)
+        }
 
-        if (BLOCKED.test(text)) {
-          return this.finish('blocked', 'The model reported that it needs input or lacks a capability.', finalResponse, cumulative, continuations)
+        let decision = this.evaluator.decide({
+          rootSpec: input.rootSpec, bundle, fileStates: snapshot.fileStates, changedTurnByFile, turn, hints
+        })
+        if (decision.decision === 'completed') {
+          return this.finish('completed', decision.reason, finalResponse, bundle, continuations, decision)
         }
-        if (this.complete(text, evidence)) {
-          return this.finish('completed', 'Spec requirements are covered by passing verification evidence.', finalResponse, cumulative, continuations)
+
+        const newRuns: VerificationRun[] = []
+        if (this.verify && decision.nextChecks.length > 0) {
+          for (const request of decision.nextChecks) {
+            try {
+              newRuns.push(await this.verify(this.withCwd(request, input.workspacePath, turn)))
+            } catch (error) {
+              newRuns.push({
+                id: `verr-${newRuns.length}-${turn}`,
+                turn, label: request.label, command: [request.command, ...request.args].join(' '),
+                exitCode: null, signal: null, outputTail: String((error as Error)?.message ?? error).slice(0, 300),
+                scope: request.scope, targets: request.targets, covers: request.covers, stamps: new Map(),
+                outcome: 'observed', at: new Date().toISOString()
+              })
+            }
+          }
         }
+        if (newRuns.length > 0) {
+          allRuns = allRuns.concat(newRuns)
+          bundle.verification = allRuns
+          decision = this.evaluator.decide({
+            rootSpec: input.rootSpec, bundle, fileStates: snapshot.fileStates, changedTurnByFile, turn, hints
+          })
+          if (decision.decision === 'completed') {
+            return this.finish('completed', decision.reason, finalResponse, bundle, continuations, decision)
+          }
+        }
+
+        const progressed = bundle.turnChangedFiles.length > 0 || newRuns.some((run) => run.outcome === 'passed')
+        noProgress = progressed ? 0 : noProgress + 1
         if (noProgress >= this.budget.maxNoProgress) {
-          return this.finish('failed', `No progress after ${noProgress} consecutive continuations.`, finalResponse, cumulative, continuations)
+          return this.finish('failed', `No progress after ${noProgress} consecutive continuations.`, finalResponse, bundle, continuations, decision)
         }
+        prompt = decision.nextPrompt
       }
 
       if (this.now() - startedAt >= this.budget.maxElapsedMs) {
-        return this.finish('budget_exhausted', 'Loop reached the 2 hour wall-clock budget.', finalResponse, cumulative, continuations)
+        return this.finish('budget_exhausted', 'Loop reached the 2 hour wall-clock budget.', finalResponse, bundle, continuations)
       }
       if (continuations >= this.budget.maxContinuations) {
-        return this.finish('budget_exhausted', `Loop reached the ${this.budget.maxContinuations} continuation budget.`, finalResponse, cumulative, continuations)
+        return this.finish('budget_exhausted', `Loop reached the ${this.budget.maxContinuations} continuation budget.`, finalResponse, bundle, continuations)
       }
       continuations += 1
-      prompt = continuePrompt(input.rootSpec, cumulative, failure)
+      if (failure) prompt = continueAfterFailure(input.rootSpec, bundle, failure)
     }
   }
 
-  private complete(text: string, evidence: EvidenceBundle): boolean {
-    if (evidence.verification.length === 0) return false
-    if (!evidence.verification.some((claim) => claim.outcome === 'passed')) return false
-    return evidence.verification.every((claim) => claim.outcome !== 'failed') && !/not (?:done|complete|finished)|still (?:need|missing)/i.test(text)
+  private withCwd(request: CheckRequest, cwd: string, turn: number): VerificationRequest {
+    return { ...request, cwd, turn }
   }
 
   private finish(
@@ -132,35 +166,38 @@ export class LoopController {
     reason: string,
     finalResponse: string,
     evidence: EvidenceBundle,
-    continuations: number
+    continuations: number,
+    decision?: LoopDecision
   ): LoopRunResult {
-    return { terminal: { status, reason }, finalResponse, evidence, continuations }
+    return { terminal: { status, reason }, finalResponse, evidence, continuations, ...(decision ? { decision } : {}) }
   }
 }
 
-function dedupeClaims(claims: VerificationClaim[]): VerificationClaim[] {
-  const seen = new Set<string>()
-  const unique: VerificationClaim[] = []
-  for (const claim of claims) {
-    const key = `${claim.label}\u0000${claim.outcome}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    unique.push(claim)
-  }
-  return unique
+async function workspaceHints(workspacePath: string): Promise<WorkspaceHints> {
+  const hints: WorkspaceHints = { packageJson: false, hasTypecheckScript: false, hasTestScript: false, hasBuildScript: false, tsconfig: false }
+  try {
+    const manifest = JSON.parse(await readFile(join(workspacePath, 'package.json'), 'utf8'))
+    hints.packageJson = true
+    const scripts: Record<string, string> = manifest.scripts ?? {}
+    hints.hasTypecheckScript = typeof scripts.typecheck === 'string'
+    hints.hasTestScript = typeof scripts.test === 'string'
+    hints.hasBuildScript = typeof scripts.build === 'string'
+  } catch { /* no package.json */ }
+  try {
+    await readFile(join(workspacePath, 'tsconfig.json'))
+    hints.tsconfig = true
+  } catch { /* no tsconfig */ }
+  return hints
 }
 
-function continuePrompt(rootSpec: string, evidence: EvidenceBundle, failure?: string): string {
+function continueAfterFailure(rootSpec: string, evidence: EvidenceBundle, failure: string): string {
   const changed = evidence.changedFiles.slice(0, 10).join(', ') || 'none'
-  const verified = evidence.verification.map((claim) => `${claim.label} (${claim.outcome})`).join('; ') || 'none'
   const lines = [
-    'Continue the original task. Do not restate the whole plan; make the remaining change and verify it.',
+    'The previous attempt failed. Continue the original task; do not repeat the same error.',
     `Original spec: ${truncate(rootSpec, 1500)}`,
     `Changed files so far: ${changed}`,
-    `Verification so far: ${verified}`
+    `The previous attempt failed with: ${truncate(failure)}`
   ]
-  if (failure) lines.push(`The previous attempt failed with: ${truncate(failure)}`)
-  lines.push('If the task is complete, run the relevant verification and say "done". If something is truly blocking, say "blocked" and what you need.')
   return lines.join('\n')
 }
 

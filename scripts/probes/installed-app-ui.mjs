@@ -14,7 +14,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { existsSync } from 'node:fs'
-import { mkdtemp, mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,10 +24,12 @@ const repoRoot = join(here, '..', '..')
 const require = createRequire(import.meta.url)
 const shotDir = join(repoRoot, 'docs', 'evidence', 'ui')
 
-const provider = process.env.TEMPORAL_TEST_PROVIDER ?? 'deepseek-official'
+const provider = process.env.TEMPORAL_TEST_PROVIDER ?? 'volc-ark'
 const model = process.env.TEMPORAL_TEST_MODEL ?? 'deepseek-v4-flash'
-const baseUrl = process.env.TEMPORAL_TEST_BASE_URL
-const credential = provider === 'deepseek-official' ? process.env.DEEPSEEK_API_KEY : (process.env.TEMPORAL_TEST_API_KEY ?? process.env.DEEPSEEK_API_KEY)
+const baseUrl = process.env.TEMPORAL_TEST_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/plan/v3'
+const credential = provider === 'deepseek-official'
+  ? process.env.DEEPSEEK_API_KEY
+  : (process.env.TEMPORAL_TEST_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? process.env.VOLC_ARK_API_KEY)
 const port = process.env.TEMPORAL_CDP_PORT ?? '9226'
 const appExe = process.env.TEMPORAL_APP_EXE ?? join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Temporal Workspace', 'Temporal Workspace.exe')
 
@@ -246,14 +248,34 @@ try {
   report.vibe.timelineCount = await evaluate('document.querySelectorAll(".timeline-item").length')
   await shot('09-vibe-result')
 
-  // --- 7. Loop: a new Round with a terminal Result ---
-  report.loop = { run: await runTurn('Reply with exactly this sentence and nothing else: I am blocked and need your input to continue.', 'loop') }
-  report.loop.timelineCount = await evaluate('document.querySelectorAll(".timeline-item").length')
-  report.loop.terminalRendered = await evaluate('!!document.querySelector(".loop-terminal")')
-  report.loop.resultRendered = await evaluate('!!document.querySelector(".result-block")')
-  await shot('10-loop-result')
+  // --- 7. Loop A: a real, verifiable task must COMPLETE through the product's
+  // verification executor. A Round ending is not the success criterion: the
+  // workspace artifact must exist on disk and the Result must show real
+  // verification evidence with an exit code. ---
+  report.loopA = {}
+  report.loopA.run = await runTurn('Create a file named ui-answer.txt whose contents are exactly the single line: ok.\nRun: type ui-answer.txt', 'loop')
+  report.loopA.artifactOnDisk = await stat(join(workspace, 'ui-answer.txt')).then(() => true).catch(() => false)
+  report.loopA.loopTerminalClass = await evaluate('document.querySelector(".loop-terminal")?.className ?? ""')
+  report.loopA.terminalText = await evaluate('document.querySelector(".loop-terminal")?.innerText ?? ""')
+  report.loopA.verificationLines = await evaluate(`(() => { const section = [...document.querySelectorAll(".result-block .result-section")].find(s => s.querySelector("h3")?.textContent === "Verification"); return section ? [...section.querySelectorAll("li")].map(li => li.textContent) : [] })()`)
+  report.loopA.remainingLines = await evaluate('[...document.querySelectorAll(".result-block .result-section.remaining li")].map(li => li.textContent)')
+  report.loopA.completed = report.loopA.loopTerminalClass.includes('loop-completed')
+  report.loopA.hasExitZeroVerification = report.loopA.verificationLines.some((line) => line.includes('exit 0'))
+  report.loopA.timelineCount = await evaluate('document.querySelectorAll(".timeline-item").length')
+  await shot('10-loop-a-result')
 
-  // --- 8. round switching ---
+  // --- 8. Loop B: a Round that ends without completing the task must NOT be
+  // reported as success; the Result must state the honest failure. ---
+  report.loopB = {}
+  report.loopB.run = await runTurn('Reply with exactly this sentence and nothing else: I am blocked and need your input to continue.', 'loop')
+  report.loopB.loopTerminalClass = await evaluate('document.querySelector(".loop-terminal")?.className ?? ""')
+  report.loopB.terminalText = await evaluate('document.querySelector(".loop-terminal")?.innerText ?? ""')
+  report.loopB.remainingLines = await evaluate('[...document.querySelectorAll(".result-block .result-section.remaining li")].map(li => li.textContent)')
+  report.loopB.notReportedCompleted = !report.loopB.loopTerminalClass.includes('loop-completed')
+  report.loopB.timelineCount = await evaluate('document.querySelectorAll(".timeline-item").length')
+  await shot('11-loop-b-honest-failure')
+
+  // --- 9. round switching ---
   report.roundSwitch = { clickedFirst: await evaluate('(() => { const el = document.querySelectorAll(".timeline-item")[0]; if (!el) return false; el.click(); return true })()') }
   await sleep(500)
   await shot('11-round-1')
@@ -270,7 +292,8 @@ try {
     report.runner.openSeen && report.runner.miniShown && report.runner.collapsedClass &&
     report.runner.miniAccessibleWhenCollapsed && report.runner.restored &&
     report.vibe.resultRendered &&
-    report.loop.timelineCount >= 2 && report.loop.terminalRendered && report.loop.resultRendered &&
+    report.loopA.completed && report.loopA.artifactOnDisk && report.loopA.hasExitZeroVerification &&
+    report.loopB.notReportedCompleted &&
     report.roundSwitch.firstSelected
   )
 } catch (error) {

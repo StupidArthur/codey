@@ -12,7 +12,7 @@
  */
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -35,6 +35,7 @@ const enginePath = join(here, '.cache-domain-engine.cjs')
 const { ProductStore } = await bundle('src/main/persistence/ProductStore.ts', storePath)
 const { RoundEngine } = await bundle('src/main/rounds/RoundEngine.ts', enginePath)
 const { EvidenceCollector } = await bundle('src/main/evidence/EvidenceCollector.ts', join(here, '.cache-domain-evidence.cjs'))
+const { VerificationExecutor } = await bundle('src/main/evidence/VerificationExecutor.ts', join(here, '.cache-domain-verify.cjs'))
 const { ResultBuilder } = await bundle('src/main/result/ResultBuilder.ts', join(here, '.cache-domain-result.cjs'))
 const { LoopController, DEFAULT_LOOP_BUDGET } = await bundle('src/main/loop/LoopController.ts', join(here, '.cache-domain-loop.cjs'))
 
@@ -169,25 +170,31 @@ check('failed_result_has_reason', failed.remaining.some((line) => line.includes(
 // ---------------------------------------------------------------------------
 // Loop state machine with a deterministic fake runtime and collector.
 // ---------------------------------------------------------------------------
+function emptySnapshot() {
+  return { git: false, preexisting: new Set(), files: new Map(), dirty: new Map(), fileStates: new Map() }
+}
 function fakeLoop({ prompts, bundles }) {
   let turn = 0
   const runtime = { prompt: async () => { const step = prompts[Math.min(turn, prompts.length - 1)]; turn += 1; if (step instanceof Error) throw step; return { text: step } } }
   const collector = {
-    baseline: async () => ({ git: false, files: new Set(), startedAt: Date.now() }),
-    collect: async () => bundles[Math.min(turn - 1, bundles.length - 1)]
+    baseline: async () => emptySnapshot(),
+    collect: async () => ({ bundle: bundles[Math.min(turn - 1, bundles.length - 1)], snapshot: emptySnapshot() })
   }
   return { controller: new LoopController(runtime, collector), turns: () => turn }
 }
+function emptyBundle(extra = {}) {
+  return { changedFiles: [], turnChangedFiles: [], newFiles: [], preexistingChanges: [], toolFacts: [], verification: [], outcome: 'completed', ...extra }
+}
 
 const noProgressInput = { rootSpec: 'do something', workspacePath: root, takeEvents: () => [] }
-const noProgress = fakeLoop({ prompts: ['still working'], bundles: [{ changedFiles: [], newFiles: [], verification: [], outcome: 'completed' }] })
+const noProgress = fakeLoop({ prompts: ['still working'], bundles: [emptyBundle()] })
 const noProgressResult = await noProgress.controller.run(noProgressInput)
 check('loop_no_progress_fails', noProgressResult.terminal.status === 'failed' && noProgressResult.terminal.reason.includes('No progress'))
 check('loop_no_progress_budget', noProgress.turns() === DEFAULT_LOOP_BUDGET.maxNoProgress)
 
 const error = fakeLoop({
   prompts: [new Error('boom'), new Error('boom'), 'unused'],
-  bundles: [{ changedFiles: [], newFiles: [], verification: [], outcome: 'failed' }]
+  bundles: [emptyBundle({ outcome: 'failed' })]
 })
 const errorResult = await error.controller.run(noProgressInput)
 check('loop_same_error_retry_limit', errorResult.terminal.status === 'failed' && error.turns() === DEFAULT_LOOP_BUDGET.maxSameError)
@@ -195,8 +202,11 @@ check('loop_same_error_retry_limit', errorResult.terminal.status === 'failed' &&
 let progressCounter = 0
 const runtimeProgress = { prompt: async () => ({ text: 'still missing required item' }) }
 const collectorProgress = {
-  baseline: async () => ({ git: false, files: new Set(), startedAt: Date.now() }),
-  collect: async () => ({ changedFiles: [`file-${progressCounter++}.ts`], newFiles: [], verification: [], outcome: 'completed' })
+  baseline: async () => emptySnapshot(),
+  collect: async () => {
+    const file = `file-${progressCounter++}.ts`
+    return { bundle: emptyBundle({ changedFiles: [file], turnChangedFiles: [file] }), snapshot: emptySnapshot() }
+  }
 }
 const budgetController = new LoopController(runtimeProgress, collectorProgress)
 const budgetResult = await budgetController.run(noProgressInput)
@@ -207,8 +217,11 @@ check('loop_budget_exhausted', budgetResult.terminal.status === 'budget_exhauste
 // with the wall-clock reason; a run just below it must keep going.
 function progressCollector(counter) {
   return {
-    baseline: async () => ({ git: false, files: new Set(), startedAt: 0 }),
-    collect: async () => ({ changedFiles: [`wall-${counter.n++}.ts`], newFiles: [], verification: [], outcome: 'completed' })
+    baseline: async () => emptySnapshot(),
+    collect: async () => {
+      const file = `wall-${counter.n++}.ts`
+      return { bundle: emptyBundle({ changedFiles: [file], turnChangedFiles: [file] }), snapshot: emptySnapshot() }
+    }
   }
 }
 let atClock = 0
@@ -232,13 +245,26 @@ const belowResult = await new LoopController(
 ).run(noProgressInput)
 check('loop_wall_clock_just_below_then_cross', belowResult.terminal.status === 'budget_exhausted' && belowTurn === 2)
 
-const blocked = fakeLoop({ prompts: ['I am blocked and need your input to continue.'], bundles: [{ changedFiles: [], newFiles: [], verification: [], outcome: 'completed' }] })
+const blocked = fakeLoop({ prompts: ['[BLOCKED] needs user approval'], bundles: [emptyBundle()] })
 const blockedResult = await blocked.controller.run(noProgressInput)
 check('loop_blocked', blockedResult.terminal.status === 'blocked')
 
-const complete = fakeLoop({ prompts: ['Done, tests pass.'], bundles: [{ changedFiles: ['x.ts'], newFiles: [], verification: [{ label: 'pnpm test', detail: 'ok', outcome: 'passed', provenance: 'tool' }], outcome: 'completed' }] })
-const completeResult = await complete.controller.run(noProgressInput)
-check('loop_completes_with_evidence', completeResult.terminal.status === 'completed' && complete.turns() === 1)
+// Positive path: completion only through the real collector, the real
+// verification executor and the evaluator gate — never through a model claim.
+const gateRoot = await mkdtemp(join(tmpdir(), 'temporal-gate-'))
+const gateRuntime = {
+  prompt: async () => {
+    await mkdir(join(gateRoot, 'src'), { recursive: true })
+    await writeFile(join(gateRoot, 'src', 'answer.txt'), 'verify\n')
+    return { text: 'done' }
+  }
+}
+const gateEvidence = new EvidenceCollector()
+const gateController = new LoopController(gateRuntime, gateEvidence, DEFAULT_LOOP_BUDGET, Date.now, new VerificationExecutor().run)
+const gateSpec = 'Create a file src/answer.txt.\nRun: type src\\answer.txt'
+const gateResult = await gateController.run({ rootSpec: gateSpec, workspacePath: gateRoot, takeEvents: () => [] })
+check('loop_completes_with_valid_evidence', gateResult.terminal.status === 'completed' && gateResult.terminal.reason.includes('req-1') && gateResult.terminal.reason.includes('req-2'))
+check('loop_completed_evidence_has_exit_codes', gateResult.evidence.verification.some((run) => run.outcome === 'passed' && run.exitCode === 0))
 
 // ---------------------------------------------------------------------------
 // RoundEngine: Plan reuse/versioning, Plan→Vibe finalize, Vibe accumulation,
@@ -266,6 +292,7 @@ const engine = new RoundEngine({
   ensureRuntime: async () => runtime,
   evidence,
   resultBuilder: new ResultBuilder(),
+  verify: new VerificationExecutor().run,
   takeEvents: () => (verification ? [{ id: 'v', at: new Date().toISOString(), kind: 'verification', message: 'pnpm test' }] : []),
   onRoundChanged: () => {}
 })
@@ -288,12 +315,16 @@ const vibeResult = engineSession.getResult(rounds[1].id)
 check('vibe_finalize_builds_result', rounds[1].status === 'completed' && Boolean(vibeResult))
 
 verification = true
-await engine.submit({ session: projectSession, mode: 'loop', spec: 'loop spec' })
+// The loop round must complete through the real gate: the model writes the
+// next artifact and the product's verification executor checks it.
+const loopTarget = `artifact-${fileCounter + 1}.txt`
+await engine.submit({ session: projectSession, mode: 'loop', spec: `Create a file ${loopTarget}.\nRun: type ${loopTarget}` })
 rounds = engineSession.listRounds(projectSession.id)
 const loopRound = rounds[2]
 const loopResult = engineSession.getResult(loopRound.id)
 check('loop_creates_new_terminal_round', rounds.length === 3 && loopRound.mode === 'loop' && loopRound.status === 'completed')
 check('loop_result_terminal', loopResult?.loopTerminal?.status === 'completed')
+check('loop_result_requirement_coverage', Array.isArray(loopResult?.coverage) && loopResult.coverage.length >= 2 && loopResult.coverage.every((item) => item.status === 'satisfied'))
 check('evidence_persisted', engineSession.listEvidence(loopRound.id).some((record) => record.kind === 'workspace'))
 engineSession.close()
 

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import type { ClientConnection, RequestPermissionRequest, SessionNotification } from '@agentclientprotocol/sdk'
 import type { ModelSettings, PermissionPreset, RunnerEvent } from '../../shared/contracts'
+import type { ToolCallFact } from '../evidence/evidence'
 import { resolveInstalledDshBin } from './SessionDiscovery'
 import { TurnProjector, type ProjectedEvent } from './projection'
 
@@ -40,6 +41,7 @@ export class DshRuntime {
   private busy = false
   private closed = false
   private projector?: TurnProjector
+  private turnToolFacts: ToolCallFact[] = []
   private patchDir?: string
   private stderr = ''
   private protocolVersion = 1
@@ -136,6 +138,7 @@ export class DshRuntime {
     this.busy = true
     const projector = new TurnProjector()
     this.projector = projector
+    this.turnToolFacts = []
     const controller = new AbortController()
     const timeoutMs = this.options.requestTimeoutMs ?? 0
     const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined
@@ -187,6 +190,14 @@ export class DshRuntime {
     if (notification.sessionId !== this.sessionId) return
     projector.handle(notification.update)
     for (const event of projector.drain()) this.emit(event)
+    this.turnToolFacts.push(...projector.drainToolFacts())
+  }
+
+  /** Returns and clears the structured tool facts for the most recent turn. */
+  takeToolFacts(): ToolCallFact[] {
+    const facts = this.turnToolFacts
+    this.turnToolFacts = []
+    return facts
   }
 
   /**

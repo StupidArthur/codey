@@ -14,6 +14,11 @@
 | 权限审批按 Session preset 决策，不再一律放行 | `DshRuntime.onPermission` 旧实现无条件选 `allow`，使 `read-only` 被客户端审批绕过。现改为：`read-only` 仅批准 `read/search/think/fetch` 工具种类，其余走 `reject_*`（事件 `permission denied by read-only (<kind>)`）；`workspace-write` / `danger-full-access` 批准，边界交由 DSH sandbox 执行。 |
 | `LoopController` 引入可注入时钟 | 构造参数新增 `now: () => number = Date.now`，可在不真实等待 2 小时的前提下确定性地验证墙钟预算边界（到达边界与刚好未到）。 |
 | 窗口级截图改用 `PrintWindow` | 前台锁定 + 置顶都无法解除应用窗口被其它窗口遮挡；`scripts/probes/capture-window.ps1 -Mode 2`（`PW_RENDERFULLCONTENT`）只绘制目标窗口像素，启动页窗口级证据用它采集；工作区各状态用 CDP `Page.captureScreenshot`（渲染器像素，与其它窗口无关）。 |
+| Verification 改由产品自有执行器运行真实命令 | 公开 ACP 无 terminal 块、无 `rawInput`/`rawOutput`、无退出码；`kind` 一律 `other`、`title` 只等于工具名。`VerificationExecutor` 用 `child_process` 在 workspace 下实跑检查并记录真实退出码/信号/输出尾/文件 stamps。DSH 工具 `completed` 与标题正则一律不算验证通过。 |
+| `cmd /c` 参数加 `windowsVerbatimArguments` | Node spawn 默认会为含空格参数补引号，使 `cmd /c if exist "path" (…)` 内的内嵌引号被破坏而恒 exit 1（即使文件存在）；仅 `command==='cmd'` 时传 `windowsVerbatimArguments: true` 后 `if exist`/`findstr /c:` 等含引号命令恢复正常。 |
+| 完成门槛改为四条件程序化判定 | `LoopEvaluator.decide`：① root Spec 每行提取 required item 且不截断；② 每项需被当前有效（stamps/时序比对）且相关（file 级 targets∩changedFiles）的真实检查以 exit 0 覆盖；③ 无 pending/unknown；④ 无已知反证（检查后文件再改、产物缺失、失败检查、未恢复的 DSH 工具失败）。reason 由实际 coverage 生成。 |
+| 阻塞仅认结构化 `[BLOCKED]` 标记 | 模型正文行首出现 `[BLOCKED]` 才触发 `blocked` 终态，不再用宽泛否定词正则；续跑提示明确告知模型该标记的用途。 |
+| Evidence 采集区分执行前存量改动 | `EvidenceCollector.baseline` 一次快照含 `preexisting` dirty 集合；`collect` 按 turn 增量产出 `changedFiles`/`turnChangedFiles`，执行前已存在的用户改动不计为本轮贡献。 |
 
 ## 一、构建与静态检查
 
@@ -21,7 +26,8 @@
 | --- | --- | --- |
 | 类型检查 | `pnpm typecheck` | 通过（`tsc --noEmit -p tsconfig.json`，退出码 0，2026-09-26 复跑） |
 | 生产构建 | `pnpm build` | 通过（main/preload/renderer 三端构建成功） |
-| 产品域探针 | `ELECTRON_RUN_AS_NODE=1 <electron> scripts/probes/temporal-domain.mjs` | 通过（`checks` 全 **35** 项为 `true`，`passed: true`；含 `loop_wall_clock_boundary`、`loop_wall_clock_just_below_then_cross`） |
+| 产品域探针 | `ELECTRON_RUN_AS_NODE=1 <electron> scripts/probes/temporal-domain.mjs` | 通过（`checks` 全 **37** 项为 `true`，`passed: true`；含 `loop_wall_clock_boundary`、`loop_wall_clock_just_below_then_cross`、`loop_completes_with_valid_evidence`、`loop_result_requirement_coverage`） |
+| 四条件门槛探针 | `ELECTRON_RUN_AS_NODE=1 <electron> scripts/probes/loop-gate-impl.mjs` | 通过（**16** 项，验收 2 反例全部不能 completed + 正向路径 completed，穿过正式 evaluator/collector/controller） |
 | 合并逻辑探针 | `node scripts/probes/dsh-session-merge.mjs` | 通过（10 项断言） |
 | ACP 发现探针 | `node scripts/probes/dsh-session-discovery-impl.mjs` | 通过（隔离、分页、重复稳定、错误路径） |
 | 发现持久化探针 | `ELECTRON_RUN_AS_NODE=1 <electron> scripts/probes/dsh-discovery-persistence.mjs` | 通过（重启不产生重复投影） |
@@ -60,7 +66,7 @@ TEMPORAL_TEST_API_KEY=<用户提供> node scripts/probes/installed-app-legacy-e2
 
 ## 三、阶段 B — 产品域、持久化与窗口
 
-`temporal-domain.mjs` 的 35 项断言（全部 `true`），关键项：
+`temporal-domain.mjs` 的 37 项断言（全部 `true`），关键项：
 
 - 新 Session 默认权限 `workspace-write`，可持久化修改。
 - draft revision 递增；只有 revision 未变时才清理已提交草稿。
@@ -84,7 +90,7 @@ TEMPORAL_TEST_API_KEY=<用户提供> node scripts/probes/installed-app-legacy-e2
 | Plan 连续提交复用 Round 并累积版本 | `temporal-domain.mjs`：`plan_reuses_single_round` / `plan_two_versions`；应用内 `installed-app-ui.mjs`：`plan.timelineCount=1` / `versionTabs=2` | 通过 |
 | Plan→Vibe 自动收口 | `plan_to_vibe_finalizes_plan` | 通过 |
 | 连续 Vibe 累积、结束后顶部 Result | `vibe_reuses_round` / `vibe_finalize_builds_result`；应用内 `vibe.resultRendered=true` | 通过 |
-| Loop 每次 Submit 新建一个 Round，内部 turn 不进左侧 | `loop_creates_new_terminal_round`；应用内 `loop.timelineCount=3` / `terminalRendered=true` | 通过 |
+| Loop 每次 Submit 新建一个 Round，内部 turn 不进左侧 | `loop_creates_new_terminal_round`；应用内 `loopA.timelineCount=3` / `loopB.timelineCount=4` | 通过 |
 | **真实应用内 Vibe 提交（ARK 模型）** | `scripts/probes/installed-app-e2e.mjs`：Vibe 段 `status=completed`、`evidence=1`、`NOTES.md` 标记匹配 | 通过 |
 | Runner 覆盖但不替换 Result；终态消失；可收回侧栏 | 应用内 `installed-app-ui.mjs`：`openSeen`/`miniShown`/`collapsedClass`/`miniAccessibleWhenCollapsed`/`restored` 全 `true` | 通过（真实应用内目视） |
 | 旧历史只读占位 | `sessionMerge` + renderer 占位；`installed-app-legacy-e2e.mjs` `historyState: legacy-unavailable` | 通过 |
@@ -108,10 +114,11 @@ TEMPORAL_TEST_API_KEY=<用户提供> node scripts/probes/installed-app-ui.mjs
 - Plan×2：`timelineCount: 1`、`versionTabs: 2`（`Plan → Plan` 只有一个 Round、两个版本）。
 - Runner：打开 → `收起` 出现 mini → 折叠侧栏后 mini 仍可达 → 点击 mini 恢复 Runner，全部断言 `true`；`idle: true`。
 - Vibe：`End Round` 后 `resultRendered: true`。
-- Loop：`timelineCount: 3`、`terminalRendered: true`、`resultRendered: true`（Loop 新 Round + 终态 Result）。
+- Loop A（正向，真实可验证任务）：Spec `Create a file named ui-answer.txt whose contents are exactly the single line: ok.` + `Run: type ui-answer.txt` → `loopTerminalClass: loop-completed`、Verification 两行 `artifact req-1 ✔passed (exit 0)` / `verify req-2 ✔passed (exit 0)`、`artifactOnDisk: true`、`remainingLines: []`、终态 reason 含 `req-1`/`req-2` 覆盖（非无条件 “Spec requirements are covered”）。**Round 结束不等于成功：completed 判定以磁盘产物 + 真实退出码验证证据为准**。
+- Loop B（负向，故意不可验证）：Spec 要求只回一句 “I am blocked…” → 模型显式 `[BLOCKED]` → `loopTerminalClass: loop-blocked`、`notReportedCompleted: true`、Remaining 如实显示 `The model reported that it needs user input to continue.` 与 `No verification evidence passed for this execution.`。一个 Round 结束（blocked）**没有**被渲染成任务成功。
 - Round 切换：点首轮 `firstSelected: true`。
 
-截图（`docs/evidence/ui/`，共 12 张）：`01-startup-launcher`、`01-startup-launcher-desktop`、`03-workspace-empty`、`04-plan-versions`、`05-runner-open`、`06-runner-collapsed`、`07-sidebar-collapsed`、`08-runner-restored`、`09-vibe-result`、`10-loop-result`、`11-round-1`、`12-round-last`。
+截图（`docs/evidence/ui/`，共 13 张）：`01-startup-launcher`、`01-startup-launcher-desktop`、`03-workspace-empty`、`04-plan-versions`、`05-runner-open`、`06-runner-collapsed`、`07-sidebar-collapsed`、`08-runner-restored`、`09-vibe-result`、`10-loop-a-result`、`11-loop-b-honest-failure`、`11-round-1`、`12-round-last`。
 
 截图合规性：工作区各状态为 CDP 页面级截图（2501×1469，渲染器像素，只含应用页面，不含其它窗口）；`01-startup-launcher-desktop` 为 `PrintWindow` 窗口级截图（1442×901，只绘制应用窗口）。逐张像素统计与 CDP 启动页一致（启动页 2501×1469 / 窗口级 1442×901 均为 `meanRGB=(241,244,248)`、强色像素 0%），且无一张具有用户浏览器全屏的尺寸（1646×1029），可确认不含其它应用或私人内容。
 
@@ -122,34 +129,53 @@ TEMPORAL_TEST_API_KEY=<用户提供> node scripts/probes/installed-app-ui.mjs
 | 项 | 证据 | 结果 |
 | --- | --- | --- |
 | 执行前后 workspace 证据（git/非 git/产物/工具事件） | `EvidenceCollector`（非 git 用文件集时间戳差分）；`evidence_persisted` | 通过 |
+| Verification 由产品执行器实跑并记录真实退出码 | `loop_completed_evidence_has_exit_codes`；安装后 e2e Loop 段 `verificationCount=2`、`evidenceKinds` 含 `command` | 通过 |
+| 工具 completed ≠ 检查通过 | `loop-gate-impl.mjs`：工具 completed 但 exit 非零 → `observed`/`failed`，不提升为 passed；标题含 test 的非验证调用不 passed | 通过 |
+| 模型自报通过不 passed；缺退出码记 unknown | `loop-gate-impl.mjs`：回复 “done” 无 evidence 不 completed；无退出码检查记 `observed`/`unknown` 且不 completed | 通过 |
 | 每条 Verification 对应真实证据 | `no_evidence_no_passed_verification` / `evidence_backs_verification` | 通过 |
+| 四条件门槛：root Spec 全覆盖 + 无 pending/unknown + 相关检查通过 + 无已知反证 | `loop-gate-impl.mjs` 验收 2 反例 8 项 + 正向路径 1 项（含 A+B 仅 A、无关测试、unknown、检查后文件再改失效、产物删除失效、失败检查阻塞、长 Spec 末尾要求保留、中文/换说法不依赖否定词正则） | 通过（均穿正式 evaluator/collector/controller） |
+| 完成 reason 由实际 coverage 生成 | `loop_result_requirement_coverage`；安装后 Loop 终态 reason 含 `req-1 (…)`、`req-2 (…)` 证据 ID | 通过 |
 | 失败/预算终态显示真实原因，不输出空 Remaining | `failed_result_has_reason` | 通过 |
 | Loop 预算：16 continuation | `loop_budget_exhausted`（第 17 次后 `budget_exhausted`） | 通过 |
 | 连续 3 次无进展 | `loop_no_progress_budget` | 通过 |
 | 同一错误最多 2 次 | `loop_same_error_retry_limit` | 通过 |
-| 权限/阻塞终止 | `loop_blocked` | 通过 |
-| 证据充分才 `completed` | `loop_completes_with_evidence` | 通过（确定性 fake） |
-| **真实模型 Loop 终态（ARK）** | `installed-app-e2e.mjs`：Loop 段 `status=blocked`、`evidence=1`、`loopTerminal.status=blocked` 且带真实原因 | 通过（证据门控下达成合法终态；`completed` 路径由确定性探针覆盖，本轮真实模型未触发通过校验的命令） |
+| 结构化 `[BLOCKED]` 阻塞终止 | `loop_blocked`；应用内 `installed-app-ui.mjs` Loop B 模型显式 `[BLOCKED]` → `loop-blocked` | 通过 |
+| 证据充分才 `completed` | `loop_completes_with_valid_evidence`（确定性正例穿过真实 collector+executor+engine） | 通过 |
+| **真实模型 Loop 正/负（安装后应用，ARK）** | `installed-app-e2e.mjs` Loop 段：Spec 创建 `NOTES.md`（精确单行）+ `Run: findstr /c:"<tag>" NOTES.md` → `status=completed`、`verificationCount=2`、`loopTerminal.status=completed`（reason 含 req-1/req-2 证据 ID）、`remainingCount=0`、磁盘文件 `exists=true`+`matchesMarker=true`；`installed-app-ui.mjs` Loop A 正向 `loop-completed`+exit 0 证据、Loop B 负向 `loop-blocked` 且不显示成功 | 通过（1 正 1 负，均如实） |
 | **2 小时墙钟预算边界** | `temporal-domain.mjs`（可注入时钟）：`loop_wall_clock_boundary`（恰好到达 `maxElapsedMs` → `budget_exhausted`、`reason` 含 “2 hour”、仅 1 turn）；`loop_wall_clock_just_below_then_cross`（差 1ms 继续，下一 turn 越过 → 2 turns，`budget_exhausted`） | 通过（确定性覆盖边界，未真实等待 2 小时） |
+
+## 五之二、阶段 3 — Windows 工具执行层调查（DLL 错误定位）
+
+`todo_4.md` 声称 `0xC0000142`/`3221225794`（`STATUS_DLL_INIT_FAILED`）。分层复现与结论（均脱敏，未读私有 JSONL）：
+
+| 层 | 探针/命令 | 结果 |
+| --- | --- | --- |
+| 系统层 `cmd` | `spawn('cmd',['/c','echo test-verify && type …'])`（`dsh-tooltrace-impl.mjs` systemShell） | 通过（`stdout=32`，exit 0） |
+| 系统层 `pwsh` | `execFile('pwsh', …)`（`pwsh-repro-impl.mjs` systemPwsh） | **本机未安装 PowerShell 7**：`spawn pwsh ENOENT`；仅有 `powershell.exe`（Windows PowerShell 5.1）与 `cmd.exe` |
+| DSH ACP 工具层（普通 Node 驱动） | `dsh-tooltrace-impl.mjs`：`pwsh` 标题工具多轮采样 + per-call 状态 | 间歇失败：3 次运行中 2 次出现 `write@failed`（DSH 的 `write` 工具，非 `pwsh`），随后模型重试成功（`fileCreated=true`）；ACP 仅暴露 `status=failed`，**无** terminal 块、`rawInput`/`rawOutput`、退出码或错误文本，模型正文也未含错误码（`modelMentionsDllError=false`） |
+| 安装后应用驱动 DSH | `installed-app-e2e.mjs` / `installed-app-ui.mjs` | 真实提交正常完成；产品 Verification 走自身执行器（`cmd`，`windowsVerbatimArguments`），不受 DSH 工具间歇失败影响 |
+
+结论（边界如实）：**无法从公开 ACP 抓到 `0xC0000142` 字面错误文本**——ACP 不传输工具错误文本/退出码。可确认的事实是：DSH 工具层（普通 Node 与安装包下同源）存在**间歇性工具失败**（本轮采样为 `write` 工具），系统层 `cmd` 正常、系统 `pwsh` 未安装；产品自身执行器用 `cmd`（恒可用）实跑检查，故安装后真实 Loop 的验证证据不依赖 DSH 工具成败。`0xC0000142` 的底层归属因此标为**未在工具层文本证据中确认根因**，不冒充已定位；对产品能力边界的体现是：验证始终用产品执行器 + 真实退出码，DSH 工具失败只作为 `observed`/knownIssue，绝不提升为 passed。
 
 ## 六、阶段 E — Windows 安装包与安装后验证
 
 | 项 | 命令/路径 | 结果 |
 | --- | --- | --- |
-| 打包 | `pnpm dist:win`（`electron-vite build && electron-builder --win nsis --x64`） | 通过 |
-| 安装包产物 | `release/Temporal Workspace Setup 0.1.0.exe`，**205.5 MB**（源码当前构建，已重装用于本页 1–3 项） | 通过 |
-| 静默安装 | `<installer> /S`，退出码 0 | 通过 |
-| 安装目录 | `%LOCALAPPDATA%\Programs\Temporal Workspace\Temporal Workspace.exe`（233.1 MB） | 通过 |
-| 安装后真实提交（ARK） | 启动已安装应用（CDP）→ 保存模型设置 → 新建 Session → Vibe/Loop 提交 | 通过（Vibe `completed`+证据；Loop 证据背书终态；renderer 为打包页面 `pageUrlIsPackaged: true`） |
+| 打包 | `pnpm dist:win`（`electron-vite build && electron-builder --win nsis --x64`） | 通过（TODO 4 源码 commit 重打） |
+| 安装包产物 | `release/Temporal Workspace Setup 0.1.0.exe`（源码当前构建，已静默重装用于本页阶段 3/4 实测） | 通过 |
+| 静默安装 | `<installer> /S`，`Test-Path` 确认安装目录存在 | 通过 |
+| 安装目录 | `%LOCALAPPDATA%\Programs\Temporal Workspace\Temporal Workspace.exe` | 通过 |
+| 安装后真实提交（ARK） | 启动已安装应用（CDP 9222）→ 保存模型设置 → 新建 Session → Vibe/Loop 提交 | 通过（Vibe `completed`+证据；**Loop `completed`**：`verificationCount=2`、`loopTerminal.status=completed`、reason 含 req-1/req-2 证据 ID、`remainingCount=0`；renderer 为打包页面 `pageUrlIsPackaged: true`） |
 | 安装后 read-only 阻止写入 | `installed-app-e2e.mjs` 场景 `readonly` | 通过（`workspaceFile.exists:false`、`changes:[]`、`outputMentionsDenial:true`） |
 | 安装后旧 Session 恢复与重启 | `installed-app-legacy-e2e.mjs` | 通过（同一 DSH ID、Round 1/2、标记召回） |
-| 安装后 UI 交互 | `installed-app-ui.mjs` | 通过（12 张截图，见阶段 C） |
-| 安装后稳定性 | 连续多轮真实提交（解包目录 3 轮 + 安装目录 1 轮，每轮含 Vibe+Loop） | 通过（无原生 abort，进程存活） |
+| 安装后 UI 交互 | `installed-app-ui.mjs` | 通过（13 张截图，见阶段 C；Loop A 正向 completed+exit 0 证据，Loop B 负向 blocked 不显示成功） |
+| 安装后稳定性 | 连续多轮真实提交（本轮 Vibe+Loop+readonly+legacy 多场景） | 通过（无原生 abort，进程存活） |
 | 内置 DSH | 安装包内 `resources/app/node_modules/@deepseek-ai/dsh` 版本与 `0.1.7-rc.2` 一致，用户机器无需系统 DSH | 通过 |
 
 ## 七、未运行项与阻塞
 
 1. **启动页 “Session 列表” 子状态的目视截图**：`window.temporal.chooseWorkspace` 被 `contextBridge` 冻结不可覆写（`pickerOverrideSupported: false`），无 IPC 可在不打开 Session 时注入 `workspacePath`，原生目录对话框不可自动化。功能正确性由验收 A 的发现/打开路径与 `dsh-session-discovery-impl.mjs` 覆盖，仅该子状态无独立截图。
 2. **真实等待 2 小时的墙钟实测**：以可注入时钟在 `temporal-domain.mjs` 确定性覆盖边界（恰好到达与刚好未到），未实际挂机 2 小时。
+3. **`0xC0000142`/`3221225794` 的根因未在工具层文本证据中确认**：公开 ACP 不传输工具错误文本/退出码；`dsh-tooltrace-impl.mjs` 与 `pwsh-repro-impl.mjs` 能确认的是 DSH 工具层存在间歇失败（本轮采样为 `write` 工具）且系统 `pwsh` 未安装、系统 `cmd` 正常。产品验证不依赖 DSH 工具，安装后真实 Loop 通过产品执行器（`cmd`）拿到 exit 0 证据完成。该限制不影响已完成 gate，如实记录。
 
 以上未运行项不影响已通过的代码级、进程级、真实模型、安装后应用与 UI gate；不计入通过。除此之外，阶段 A–E 的可控 V1 gate 均通过。

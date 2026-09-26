@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunnerEvent, SessionSummary } from '../../shared/contracts'
 import type { DshRuntime } from '../dsh/DshRuntime'
-import type { EvidenceBundle, EvidenceCollector } from '../evidence/EvidenceCollector'
+import type { EvidenceCollector } from '../evidence/EvidenceCollector'
+import type { EvidenceBundle, VerificationExecutorFn, VerificationRun } from '../evidence/evidence'
 import { LoopController } from '../loop/LoopController'
 import type { ProductStore } from '../persistence/ProductStore'
 import type { ResultBuilder } from '../result/ResultBuilder'
@@ -14,6 +15,8 @@ export interface RoundEngineDeps {
   resultBuilder: ResultBuilder
   /** Returns and clears the runner events accumulated since the last execution. */
   takeEvents: () => RunnerEvent[]
+  /** Product-owned verification executor; the only source of passed/failed checks. */
+  verify?: VerificationExecutorFn
   /** Persist the DSH session id after a lazy create. */
   onDshSessionCreated?: (dshSessionId: string) => void
   onRoundChanged?: () => Promise<void> | void
@@ -38,21 +41,28 @@ export class RoundEngine {
     const open = rounds.at(-1)
     if (open?.status === 'active' && open.mode !== input.mode) await this.finalize(input.session, open)
     if (open?.status === 'active' && open.mode === 'loop') await this.finalizeLoopInterrupted(input.session, open)
-
     if (input.mode === 'loop') return this.submitLoop(input)
 
     const current = store.listRounds(input.session.id).at(-1)
     const round = current?.status === 'active' && current.mode === input.mode
       ? current
       : this.createRound(input.session, input.mode, input.spec)
+    return this.submitDirect(input, round, input.mode)
+  }
+
+  private async submitDirect(input: SubmitInput, round: RoundSummary, mode: 'plan' | 'vibe'): Promise<{ roundId: string; outcome: ExecutionOutcome }> {
+    const { store } = this.deps
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
       const runtime = await this.deps.ensureRuntime()
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
       const { text } = await runtime.prompt(input.spec)
-      const evidence = await this.deps.evidence.collect(input.session.workspacePath, baseline, this.deps.takeEvents(), 'completed')
-      this.saveEvidence(round.id, evidence)
-      if (input.mode === 'plan') {
+      const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
+      const { bundle } = await this.deps.evidence.collect(
+        input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
+      )
+      this.saveEvidence(round.id, bundle)
+      if (mode === 'plan') {
         store.appendPlanVersion(round.id, { id: randomUUID(), submittedSpec: input.spec, planMarkdown: text, createdAt: new Date().toISOString() })
       } else {
         store.appendVibeEntry(round.id, { id: randomUUID(), specMarkdown: input.spec, assistantOutput: text, executionOutcome: 'completed', createdAt: new Date().toISOString() })
@@ -61,7 +71,7 @@ export class RoundEngine {
       round.updatedAt = new Date().toISOString()
       store.saveRound(input.session.id, round)
       store.markRoundExecutionFinished(input.session.id, round.id, 'active')
-      if (round.title === 'New Session' || !round.title) round.title = titleFor(input.spec, input.mode)
+      if (round.title === 'New Session' || !round.title) round.title = titleFor(input.spec, mode)
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: 'completed' }
     } catch (error) {
@@ -82,14 +92,15 @@ export class RoundEngine {
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
       const runtime = await this.deps.ensureRuntime()
-      const loop = new LoopController(runtime, this.deps.evidence)
+      const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({ rootSpec: input.spec, workspacePath: input.session.workspacePath, takeEvents: this.deps.takeEvents })
       this.saveEvidence(round.id, result.evidence)
       const document = this.deps.resultBuilder.build({
         finalResponse: result.finalResponse,
         evidence: result.evidence,
         outcome: result.terminal.status === 'completed' ? 'completed' : 'failed',
-        loopTerminal: result.terminal
+        loopTerminal: result.terminal,
+        decision: result.decision
       })
       store.saveResult(round.id, document)
       this.terminate(input.session, round, toRoundStatus(result.terminal.status), result.finalResponse)
@@ -164,7 +175,7 @@ export class RoundEngine {
 function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
   const changedFiles: string[] = []
   const newFiles: string[] = []
-  const verification: EvidenceBundle['verification'] = []
+  const verification: VerificationRun[] = []
   let gitDiffSummary: string | undefined
   for (const record of records) {
     if (record.kind === 'workspace' && record.label === 'git diff --stat') { gitDiffSummary = record.detail; continue }
@@ -172,10 +183,20 @@ function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
       changedFiles.push(record.label)
       if (record.detail === 'created') newFiles.push(record.label)
     } else if (record.kind === 'command') {
-      verification.push({ label: record.label, detail: record.detail, outcome: record.outcome === 'observed' ? 'observed' : record.outcome, provenance: 'tool' })
+      verification.push({
+        id: record.id, turn: record.turn ?? 1, label: record.label, command: record.command ?? record.label,
+        exitCode: record.exitCode ?? null, signal: null, outputTail: record.detail,
+        scope: record.targets && record.targets.length > 0 ? 'file' : 'workspace',
+        targets: record.targets ?? [], covers: record.covers ?? [], stamps: new Map(),
+        outcome: record.outcome === 'observed' ? 'observed' : record.outcome,
+        at: record.observedAt
+      })
     }
   }
-  return { changedFiles, newFiles, ...(gitDiffSummary ? { gitDiffSummary } : {}), verification, outcome: 'completed' }
+  return {
+    changedFiles, turnChangedFiles: [], newFiles, preexistingChanges: [],
+    ...(gitDiffSummary ? { gitDiffSummary } : {}), toolFacts: [], verification, outcome: 'completed'
+  }
 }
 
 function toRoundStatus(status: LoopTerminalSummary['status']): RoundStatus {

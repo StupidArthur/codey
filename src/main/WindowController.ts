@@ -9,6 +9,7 @@ import { DshRuntime } from './dsh/DshRuntime'
 import { SessionDiscovery, type DiscoveredDshSession } from './dsh/SessionDiscovery'
 import { historyStateFor, mergeSessions } from './dsh/sessionMerge'
 import { EvidenceCollector } from './evidence/EvidenceCollector'
+import { VerificationExecutor } from './evidence/VerificationExecutor'
 import { ProductStore, type SessionLease } from './persistence/ProductStore'
 import { ResultBuilder } from './result/ResultBuilder'
 import { RoundEngine } from './rounds/RoundEngine'
@@ -27,6 +28,7 @@ export class WindowController {
   private readonly discovery = new SessionDiscovery()
   private readonly evidence = new EvidenceCollector()
   private readonly resultBuilder = new ResultBuilder()
+  private readonly verificationExecutor = new VerificationExecutor()
   private readonly engine: RoundEngine
 
   constructor(
@@ -39,6 +41,7 @@ export class WindowController {
       ensureRuntime: () => this.ensureRuntime(),
       evidence: this.evidence,
       resultBuilder: this.resultBuilder,
+      verify: (request) => this.verificationExecutor.run(request),
       takeEvents: () => {
         const events = this.pendingEvidenceEvents
         this.pendingEvidenceEvents = []

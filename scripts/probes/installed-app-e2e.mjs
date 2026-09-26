@@ -43,7 +43,7 @@ const CDP_PORT = process.env.TEMPORAL_CDP_PORT ?? '9222'
 const provider = process.env.TEMPORAL_TEST_PROVIDER ?? 'volc-ark'
 const model = process.env.TEMPORAL_TEST_MODEL ?? 'deepseek-v4-flash'
 const baseUrl = process.env.TEMPORAL_TEST_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/plan/v3'
-const credential = process.env.TEMPORAL_TEST_API_KEY
+const credential = process.env.TEMPORAL_TEST_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? process.env.VOLC_ARK_API_KEY
 const timeoutMs = Number(process.env.TEMPORAL_E2E_TIMEOUT_MS ?? 240000)
 const scenarioFilter = process.env.TEMPORAL_TEST_SCENARIO ?? 'all'
 
@@ -214,11 +214,9 @@ const scenarios = {
   ].join(' '), { finalize: true }),
 
   loop: () => runScenario('loop', (tag) => [
-    'Complete this task fully and verify it before finishing.',
-    `Step 1: create a file named NOTES.md in the current workspace whose entire contents are exactly the single line: ${tag}`,
-    'Step 2: verify the write by running this exact shell command: cmd /c echo test-verify && type NOTES.md',
-    'If that verification succeeds, reply with exactly: done'
-  ].join(' '), { finalize: false }),
+    'Create a file named NOTES.md in the current workspace whose entire contents are exactly the single line: ' + tag,
+    `Run: findstr /c:"${tag}" NOTES.md`
+  ].join('\n'), { finalize: false }),
 
   readonly: () => runScenario('vibe', (tag) => [
     'You must create a file named NOTES.md in the current workspace.',
@@ -264,12 +262,15 @@ try {
         !result.round.result.changes.some((change) => change.startsWith('NOTES.md'))
       ))
     } else {
+      // A Loop Round must actually COMPLETE through the product verification
+      // executor — a Round that merely ended (blocked/budget/failed) is an
+      // honest failure, not a pass.
       passedChecks.push(Boolean(
         result.round &&
-        ['completed', 'blocked', 'budget_exhausted', 'failed'].includes(result.round.status) &&
+        result.round.status === 'completed' &&
         result.round.evidence >= 1 &&
         result.round.result &&
-        result.round.result.loopTerminal &&
+        result.round.result.loopTerminal?.status === 'completed' &&
         result.workspaceFile.exists && result.workspaceFile.matchesMarker
       ))
     }

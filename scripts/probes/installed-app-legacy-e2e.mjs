@@ -28,8 +28,8 @@ const esbuild = require(join(repoRoot, 'node_modules/.pnpm/esbuild@0.25.12/node_
 
 const provider = process.env.TEMPORAL_TEST_PROVIDER ?? 'volc-ark'
 const model = process.env.TEMPORAL_TEST_MODEL ?? 'deepseek-v4-flash'
-const baseUrl = process.env.TEMPORAL_TEST_BASE_URL
-const credential = process.env.TEMPORAL_TEST_API_KEY ?? process.env.DEEPSEEK_API_KEY
+const baseUrl = process.env.TEMPORAL_TEST_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/plan/v3'
+const credential = process.env.TEMPORAL_TEST_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? process.env.VOLC_ARK_API_KEY
 const port = process.env.TEMPORAL_CDP_PORT ?? '9225'
 const timeoutMs = Number(process.env.TEMPORAL_E2E_TIMEOUT_MS ?? 240000)
 const appExe = process.env.TEMPORAL_APP_EXE
