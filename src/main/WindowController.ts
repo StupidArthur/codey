@@ -23,6 +23,7 @@ export class WindowController {
   private session: SessionSummary | null = null
   private runtime: DshRuntime | null = null
   private runtimeComposition: DshRuntimeComposition | null = null
+  private runtimeStart: { composition: DshRuntimeComposition; promise: Promise<DshRuntime> } | null = null
   private lease: SessionLease | null = null
   private running = false
   private cancelRequested = false
@@ -128,7 +129,9 @@ export class WindowController {
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
       this.error = undefined
-      return await this.emitSnapshot()
+      const snapshot = await this.emitSnapshot()
+      this.prewarmRuntime(snapshot.mode, 'session.open')
+      return snapshot
     } catch (error) {
       try { nextLease.release() } catch { /* best effort */ }
       throw error
@@ -161,6 +164,7 @@ export class WindowController {
     this.assertOwnership()
     const session = this.requireSession()
     this.store.saveDraft(session.id, draft, mode)
+    this.prewarmRuntime(mode, 'draft.save')
     await this.emitSnapshot()
   }
 
@@ -175,7 +179,8 @@ export class WindowController {
     this.store.saveModelSettings(settings)
     await this.closeRuntime()
     const saved = await this.getModelSettings()
-    await this.emitSnapshot()
+    const snapshot = await this.emitSnapshot()
+    this.prewarmRuntime(snapshot.mode, 'settings.changed')
     return saved
   }
 
@@ -186,7 +191,8 @@ export class WindowController {
     this.store.setPermission(session.id, preset)
     this.session = { ...session, permission: preset }
     await this.closeRuntime()
-    await this.emitSnapshot()
+    const snapshot = await this.emitSnapshot()
+    this.prewarmRuntime(snapshot.mode, 'permission.changed')
   }
 
   async submit(spec: string, mode: RoundMode): Promise<void> {
@@ -271,16 +277,59 @@ export class WindowController {
     this.lease.assertHeld()
   }
 
+  private compositionForMode(mode: RoundMode): DshRuntimeComposition {
+    return mode === 'vibe' ? 'minimal' : 'full'
+  }
+
+  /**
+   * Best-effort runtime warmup. Session open and draft-mode changes can pay the
+   * DSH/ACP startup cost while the user is still editing. Failures are logged
+   * only; submit remains the authoritative retry path.
+   */
+  private prewarmRuntime(mode: RoundMode, reason: string): void {
+    if (!this.session || !this.lease || this.running) return
+    const composition = this.compositionForMode(mode)
+    if (this.runtimeComposition === composition || this.runtimeStart?.composition === composition) return
+    this.log('runtime.prewarm.start', { mode, composition, reason })
+    void this.ensureRuntime(mode)
+      .then(runtime => {
+        if (this.runtime === runtime && this.runtimeComposition === composition) {
+          this.log('runtime.prewarm.end', { mode, composition, reason, dshSessionId: this.session?.dshSessionId })
+        }
+      })
+      .catch(error => {
+        this.log('runtime.prewarm.error', { mode, composition, reason, error: messageOf(error) })
+      })
+  }
+
   private async ensureRuntime(mode: RoundMode): Promise<DshRuntime> {
     this.assertOwnership()
-    const composition: DshRuntimeComposition = mode === 'vibe' ? 'minimal' : 'full'
+    const composition = this.compositionForMode(mode)
 
     if (this.runtime && this.runtimeComposition === composition) return this.runtime
+
+    const starting = this.runtimeStart
+    if (starting) {
+      if (starting.composition === composition) return starting.promise
+      try { await starting.promise } catch { /* the requested composition will retry below */ }
+      if (this.runtime && this.runtimeComposition === composition) return this.runtime
+    }
+
     if (this.runtime && this.runtimeComposition !== composition) {
       this.log('runtime.switch', { from: this.runtimeComposition, to: composition, mode })
       await this.closeRuntime()
     }
 
+    const promise = this.startRuntime(mode, composition)
+    this.runtimeStart = { composition, promise }
+    try {
+      return await promise
+    } finally {
+      if (this.runtimeStart?.promise === promise) this.runtimeStart = null
+    }
+  }
+
+  private async startRuntime(mode: RoundMode, composition: DshRuntimeComposition): Promise<DshRuntime> {
     const session = this.requireSession()
     const settings = await this.getModelSettings()
     const runtime = new DshRuntime({
@@ -301,18 +350,28 @@ export class WindowController {
       model: settings.model,
       baseUrl: settings.baseUrl
     })
-    const started = await runtime.start(existing)
-    if (!existing) {
-      this.store.setDshSessionId(session.id, started.sessionId)
-      this.session = { ...session, dshSessionId: started.sessionId, kind: session.kind === 'new' ? 'legacy' : session.kind }
+    try {
+      const started = await runtime.start(existing)
+      if (!existing) {
+        this.store.setDshSessionId(session.id, started.sessionId)
+        this.session = { ...session, dshSessionId: started.sessionId, kind: session.kind === 'new' ? 'legacy' : session.kind }
+      }
+      this.runtime = runtime
+      this.runtimeComposition = composition
+      this.log('runtime.ready', { mode, composition, dshSessionId: started.sessionId })
+      return runtime
+    } catch (error) {
+      // A failed warmup/start must not leak a partially started runtime.
+      try { await runtime.close() } catch { /* best effort */ }
+      throw error
     }
-    this.runtime = runtime
-    this.runtimeComposition = composition
-    this.log('runtime.ready', { mode, composition, dshSessionId: started.sessionId })
-    return runtime
   }
 
   private async closeRuntime(): Promise<void> {
+    const starting = this.runtimeStart
+    if (starting) {
+      try { await starting.promise } catch { /* failed starts are already cleaned up */ }
+    }
     const runtime = this.runtime
     const composition = this.runtimeComposition
     this.runtime = null
