@@ -6,17 +6,17 @@ export type ExecutionOutcome = 'completed' | 'failed' | 'blocked' | 'interrupted
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 /**
- * `new` — a Temporal Session with no DSH identity yet.
+ * `new` — a Temporal Session with no backend identity yet.
  * `temporal` — has at least one Temporal Round.
- * `legacy` — an existing DSH Session with no Temporal Round; legacy history is
- * inherited read-only and is not reconstructed.
+ * `backend` — already owns an OpenCode Session but has no Temporal Round yet
+ * (typically because runtime prewarming completed while the user was editing).
  */
-export type SessionKind = 'new' | 'temporal' | 'legacy'
+export type SessionKind = 'new' | 'temporal' | 'backend'
 
 export interface SessionSummary {
   id: string
-  /** Present once the session is bound to a DSH Session. */
-  dshSessionId?: string
+  /** Present once the session is bound to an OpenCode Session. */
+  backendSessionId?: string
   title: string
   workspacePath: string
   updatedAt: string
@@ -32,8 +32,8 @@ export interface SessionListResult {
   discoveryError?: string
 }
 
-/** Legacy history is inherited, never reconstructed, and currently not readable. */
-export type HistoryState = 'none' | 'legacy-unavailable'
+/** Backend-native history is owned by OpenCode; Temporal structure starts in Codey. */
+export type HistoryState = 'none' | 'backend-unavailable'
 
 export interface RoundSummary {
   id: string
