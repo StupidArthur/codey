@@ -3,7 +3,7 @@ import type { ExecutionOutcome, LoopTerminalSummary, PermissionPreset, RunnerEve
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { DshRuntime } from '../dsh/DshRuntime'
-import { TURN_DEADLINE_MESSAGE } from '../dsh/DshRuntime'
+import { TURN_CANCELLED_MESSAGE, TURN_DEADLINE_MESSAGE } from '../dsh/DshRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, FileStateMap, ToolCallFact, VerificationRequest, VerificationRun, VerificationExecutorFn, WorkspaceSnapshot } from '../evidence/evidence'
 import { VERIFY_DIR, inputFingerprint } from '../evidence/evidence'
@@ -54,6 +54,8 @@ export interface LoopRunInput {
   /** Session permission preset the verification executor must obey. */
   permission: PermissionPreset
   takeEvents: () => RunnerEvent[]
+  /** User-requested cancellation checked between model turns and product checks. */
+  isCancelled?: () => boolean
 }
 
 export interface LoopRunResult {
@@ -110,7 +112,9 @@ export class LoopController {
     let lastModelIncompleteCount = Number.MAX_SAFE_INTEGER
     const knownCheckSignatures = new Set<string>()
 
+    throwIfCancelled(input)
     for (;;) {
+      throwIfCancelled(input)
       // Budget before entering a turn: an exhausted loop must not start
       // another model round just because the previous turn ended cleanly.
       if (this.now() >= deadline) {
@@ -124,6 +128,8 @@ export class LoopController {
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error)
       }
+      if (failure?.includes(TURN_CANCELLED_MESSAGE)) throw new Error(TURN_CANCELLED_MESSAGE)
+      throwIfCancelled(input)
       const events = input.takeEvents()
       const toolFacts = (this.runtime.takeToolFacts?.() ?? []).map((fact: ToolCallFact) => ({ ...fact, turn }))
       const outcome: ExecutionOutcome = failure ? 'failed' : 'completed'
@@ -161,6 +167,7 @@ export class LoopController {
           if (parsed.ok) {
             modelDecision = parsed.decision
           } else if (this.now() < deadline) {
+            throwIfCancelled(input)
             const reAskDeadline = Math.max(deadline - this.now(), 1_000)
             try {
               const reAsk = await this.runtime.prompt(decisionReAskPrompt(parsed.error), { timeoutMs: reAskDeadline })
@@ -208,9 +215,11 @@ export class LoopController {
           // request identity so a leftover artifact can never fake a pass here.
           const rids = this.reconcileSandboxRequests(decision, snapshot.fileStates)
           if (this.verify && decision.nextChecks.length > 0 && this.now() < deadline) {
+            throwIfCancelled(input)
             const checkDeadline = Math.max(deadline - this.now(), 1_000)
             const blockedRuns: VerificationRun[] = []
             for (const request of decision.nextChecks) {
+              throwIfCancelled(input)
               try {
                 blockedRuns.push(await this.verify(this.withRequest(request, input, turn, checkDeadline, rids)))
               } catch (error) {
@@ -252,8 +261,10 @@ export class LoopController {
         const rids = this.reconcileSandboxRequests(decision, snapshot.fileStates)
         const newRuns: VerificationRun[] = []
         if (this.verify && decision.nextChecks.length > 0 && this.now() < deadline) {
+          throwIfCancelled(input)
           const checkDeadline = Math.max(deadline - this.now(), 1_000)
           for (const request of decision.nextChecks) {
+            throwIfCancelled(input)
             try {
               newRuns.push(await this.verify(this.withRequest(request, input, turn, checkDeadline, rids)))
             } catch (error) {
@@ -317,6 +328,7 @@ export class LoopController {
         // request's scripts, never a stale copy.
         let promptExtra = ''
         if (decision.sandboxScripts.length > 0) {
+          throwIfCancelled(input)
           promptExtra = await this.materializeSandboxScripts(decision.sandboxScripts, rids, input.workspacePath)
         }
         prompt = promptExtra ? `${decision.nextPrompt}\n\n${promptExtra}` : decision.nextPrompt
@@ -479,4 +491,8 @@ function checkSignature(run: VerificationRun): string {
 function truncate(text: string, max = 200): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+function throwIfCancelled(input: LoopRunInput): void {
+  if (input.isCancelled?.()) throw new Error(TURN_CANCELLED_MESSAGE)
 }
