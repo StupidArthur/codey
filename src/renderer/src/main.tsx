@@ -13,7 +13,7 @@ const statusLabels: Record<string, string> = {
 const kindLabels: Record<SessionSummary['kind'], string> = {
   new: '尚无 Temporal Round',
   temporal: 'Temporal Session',
-  legacy: 'DSH 原生 Session · 无 Temporal Round'
+  backend: 'OpenCode Session · 无 Temporal Round'
 }
 const permissionLabels: Record<PermissionPreset, string> = {
   'read-only': 'Read-only（只读）',
@@ -409,7 +409,7 @@ function App(): React.JSX.Element {
                 <span className="session-icon">{item.title.slice(0, 1).toUpperCase()}</span><span className="session-row-copy"><strong>{item.title}</strong><small>{item.updatedAt ? `${new Date(item.updatedAt).toLocaleString()} · ` : ''}{kindLabels[item.kind]}</small></span><span className="row-arrow">→</span>
               </button>)}
               {sessions.length === 0 && !busy && <p className="empty-sessions">该目录暂无已有 Session；可直接新建。</p>}
-              {discoveryError && <p className="empty-sessions" role="alert">DSH 原生 Session 发现失败：{discoveryError}</p>}
+              {discoveryError && <p className="empty-sessions" role="alert">Session 发现失败：{discoveryError}</p>}
               <button className="session-row new-session" onClick={() => openSession()} disabled={busy}>
                 <span className="session-icon">＋</span><span className="session-row-copy"><strong>New Session</strong><small>创建后从 Plan 开始</small></span><span className="row-arrow">→</span>
               </button>
@@ -437,7 +437,7 @@ function App(): React.JSX.Element {
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
             {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} />
-              : snapshot.historyState === 'legacy-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">EXISTING DSH SESSION</div><h1>Historical transcript unavailable</h1><p>该 DSH Session 的旧对话无法通过公开接口读取。旧历史只读继承、不重建 Temporal Round；第一次提交将沿用此 Session 并创建 Round 1。</p></div></article>
+              : snapshot.historyState === 'backend-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">OPENCODE SESSION READY</div><h1>OpenCode runtime ready</h1><p>OpenCode Session 已在后台预热完成，但尚未产生 Temporal Round。第一次提交会沿用该 OpenCode Session 并创建 Round 1。</p></div></article>
               : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
           </div>
           <section className={`runner-panel ${runnerOpen ? 'open' : ''} ${cancelling ? 'stopping' : ''}`} aria-label="Runner 事件" aria-hidden={!runnerOpen}>
