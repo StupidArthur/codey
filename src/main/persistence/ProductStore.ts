@@ -6,7 +6,7 @@ import type { CheckFact, ModelSettings, RoundDetail, RoundMode, RoundSummary, Se
 
 type SessionRow = {
   id: string
-  dsh_session_id: string | null
+  backend_session_id: string | null
   title: string
   workspace_path: string
   updated_at: string
@@ -32,7 +32,7 @@ export interface PlanVersion {
   submittedSpec: string
   planMarkdown: string
   createdAt: string
-  dshActivityRef?: string
+  backendActivityRef?: string
 }
 
 export interface VibeEntry {
@@ -95,14 +95,14 @@ export interface SessionLease {
   release(): void
 }
 
-export type SavedSession = SessionSummary & { dshSessionId?: string }
+export type SavedSession = SessionSummary & { backendSessionId?: string }
 export type SavedModelSettings = Omit<ModelSettings, 'hasCredential'>
 
 const migrations = [
   `
     CREATE TABLE product_sessions (
       id TEXT PRIMARY KEY,
-      dsh_session_id TEXT UNIQUE,
+      backend_session_id TEXT UNIQUE,
       workspace_path TEXT NOT NULL,
       title TEXT NOT NULL,
       created_at TEXT NOT NULL,
@@ -151,7 +151,7 @@ const migrations = [
       submitted_spec TEXT NOT NULL,
       plan_markdown TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      dsh_activity_ref TEXT,
+      backend_activity_ref TEXT,
       UNIQUE(round_id, ordinal)
     );
 
@@ -215,7 +215,7 @@ const migrations = [
   `
 ] as const
 
-/** Product projection only. DSH remains authoritative for its conversation and runtime state. */
+/** Product projection only. OpenCode remains authoritative for its conversation and runtime state. */
 export class ProductStore {
   private readonly db: DatabaseSync
   private readonly leases = new Set<SessionLease>()
@@ -303,20 +303,20 @@ export class ProductStore {
     return row && toSessionSummary(row)
   }
 
-  getSessionByDshId(dshSessionId: string): SessionSummary | undefined {
+  getSessionByDshId(backendSessionId: string): SessionSummary | undefined {
     const row = this.stmt(`
       SELECT s.*, EXISTS(SELECT 1 FROM rounds r WHERE r.product_session_id = s.id) AS has_temporal_history
-      FROM product_sessions s WHERE s.dsh_session_id = ?
-    `).get(dshSessionId) as SessionRow | undefined
+      FROM product_sessions s WHERE s.backend_session_id = ?
+    `).get(backendSessionId) as SessionRow | undefined
     return row && toSessionSummary(row)
   }
 
-  createSession(workspacePath: string, dshSessionId?: string, title?: string): SessionSummary {
-    if (dshSessionId) {
-      const existing = this.getSessionByDshId(dshSessionId)
+  createSession(workspacePath: string, backendSessionId?: string, title?: string): SessionSummary {
+    if (backendSessionId) {
+      const existing = this.getSessionByDshId(backendSessionId)
       if (existing) {
         if (existing.workspacePath !== workspacePath) {
-          throw new Error('DSH session is already associated with another workspace')
+          throw new Error('backend session is already associated with another workspace')
         }
         return existing
       }
@@ -324,9 +324,9 @@ export class ProductStore {
     const id = randomUUID()
     const now = new Date().toISOString()
     this.stmt(`
-      INSERT INTO product_sessions(id, dsh_session_id, workspace_path, title, created_at, updated_at, permission)
+      INSERT INTO product_sessions(id, backend_session_id, workspace_path, title, created_at, updated_at, permission)
       VALUES (?, ?, ?, ?, ?, ?, 'workspace-write')
-    `).run(id, dshSessionId ?? null, workspacePath, title?.trim() || 'New Session', now, now)
+    `).run(id, backendSessionId ?? null, workspacePath, title?.trim() || 'New Session', now, now)
     return this.getSession(id)!
   }
 
@@ -337,23 +337,23 @@ export class ProductStore {
       throw new Error('A product session cannot change workspace')
     }
     this.stmt(`
-      UPDATE product_sessions SET title = ?, dsh_session_id = COALESCE(?, dsh_session_id), updated_at = ?
+      UPDATE product_sessions SET title = ?, backend_session_id = COALESCE(?, backend_session_id), updated_at = ?
       WHERE id = ?
-    `).run(session.title, session.dshSessionId ?? null, new Date().toISOString(), session.id)
+    `).run(session.title, session.backendSessionId ?? null, new Date().toISOString(), session.id)
   }
 
-  getDshSessionId(productSessionId: string): string | undefined {
-    const row = this.stmt('SELECT dsh_session_id FROM product_sessions WHERE id = ?')
-      .get(productSessionId) as { dsh_session_id: string | null } | undefined
-    return row?.dsh_session_id ?? undefined
+  getBackendSessionId(productSessionId: string): string | undefined {
+    const row = this.stmt('SELECT backend_session_id FROM product_sessions WHERE id = ?')
+      .get(productSessionId) as { backend_session_id: string | null } | undefined
+    return row?.backend_session_id ?? undefined
   }
 
-  setDshSessionId(productSessionId: string, dshSessionId: string): void {
+  setBackendSessionId(productSessionId: string, backendSessionId: string): void {
     const changed = this.stmt(`
-      UPDATE product_sessions SET dsh_session_id = ?, updated_at = ?
-      WHERE id = ? AND (dsh_session_id IS NULL OR dsh_session_id = ?)
-    `).run(dshSessionId, new Date().toISOString(), productSessionId, dshSessionId)
-    if (changed.changes !== 1) throw new Error('Product session is missing or bound to another DSH session')
+      UPDATE product_sessions SET backend_session_id = ?, updated_at = ?
+      WHERE id = ? AND (backend_session_id IS NULL OR backend_session_id = ?)
+    `).run(backendSessionId, new Date().toISOString(), productSessionId, backendSessionId)
+    if (changed.changes !== 1) throw new Error('Product session is missing or bound to another backend session')
   }
 
   getPermission(productSessionId: string): SessionSummary['permission'] {
@@ -479,21 +479,21 @@ export class ProductStore {
       this.requireRoundMode(roundId, 'plan')
       const ordinal = this.nextOrdinal('plan_versions', roundId)
       this.stmt(`
-        INSERT INTO plan_versions(id, round_id, ordinal, submitted_spec, plan_markdown, created_at, dsh_activity_ref)
+        INSERT INTO plan_versions(id, round_id, ordinal, submitted_spec, plan_markdown, created_at, backend_activity_ref)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(version.id, roundId, ordinal, version.submittedSpec, version.planMarkdown,
-        version.createdAt, version.dshActivityRef ?? null)
+        version.createdAt, version.backendActivityRef ?? null)
     })
   }
 
   listPlanVersions(roundId: string): PlanVersion[] {
     const rows = this.stmt(`
-      SELECT id, submitted_spec, plan_markdown, created_at, dsh_activity_ref
+      SELECT id, submitted_spec, plan_markdown, created_at, backend_activity_ref
       FROM plan_versions WHERE round_id = ? ORDER BY ordinal
-    `).all(roundId) as Array<{ id: string; submitted_spec: string; plan_markdown: string; created_at: string; dsh_activity_ref: string | null }>
+    `).all(roundId) as Array<{ id: string; submitted_spec: string; plan_markdown: string; created_at: string; backend_activity_ref: string | null }>
     return rows.map((row) => ({ id: row.id, submittedSpec: row.submitted_spec,
       planMarkdown: row.plan_markdown, createdAt: row.created_at,
-      ...(row.dsh_activity_ref ? { dshActivityRef: row.dsh_activity_ref } : {}) }))
+      ...(row.backend_activity_ref ? { backendActivityRef: row.backend_activity_ref } : {}) }))
   }
 
   appendVibeEntry(roundId: string, entry: VibeEntry): void {
@@ -733,12 +733,12 @@ function toSessionSummary(row: SessionRow): SessionSummary {
   const hasTemporalHistory = Boolean(row.has_temporal_history)
   return {
     id: row.id,
-    ...(row.dsh_session_id ? { dshSessionId: row.dsh_session_id } : {}),
+    ...(row.backend_session_id ? { backendSessionId: row.backend_session_id } : {}),
     title: row.title,
     workspacePath: row.workspace_path,
     updatedAt: row.updated_at,
     hasTemporalHistory,
-    kind: hasTemporalHistory ? 'temporal' : row.dsh_session_id ? 'legacy' : 'new',
+    kind: hasTemporalHistory ? 'temporal' : row.backend_session_id ? 'backend' : 'new',
     permission: (row.permission as SessionSummary['permission']) ?? 'workspace-write'
   }
 }
