@@ -63,7 +63,7 @@ function redact(value: unknown, seen = new WeakSet<object>()): unknown {
 
   const output: Record<string, unknown> = {}
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (/credential|api[_-]?key|authorization|password|secret|token/i.test(key)) {
+    if (/credential|api[_-]?key|authorization|password|secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|bearer[_-]?token/i.test(key)) {
       output[key] = '[REDACTED]'
     } else {
       output[key] = redact(item, seen)
