@@ -14,6 +14,7 @@ import { ProductStore, type SessionLease } from './persistence/ProductStore'
 import { ResultBuilder } from './result/ResultBuilder'
 import { RoundEngine } from './rounds/RoundEngine'
 import { CredentialVault } from './settings/CredentialVault'
+import { SessionLogger } from './logging/SessionLogger'
 
 /** Owns exactly one workspace and product session for one BrowserWindow. */
 export class WindowController {
@@ -26,6 +27,7 @@ export class WindowController {
   private runnerEvents: RunnerEvent[] = []
   private pendingEvidenceEvents: RunnerEvent[] = []
   private error: string | undefined
+  private logger: SessionLogger | null = null
   private readonly discovery = new SessionDiscovery()
   private readonly evidence = new EvidenceCollector()
   private readonly resultBuilder = new ResultBuilder()
@@ -42,7 +44,18 @@ export class WindowController {
       ensureRuntime: () => this.ensureRuntime(),
       evidence: this.evidence,
       resultBuilder: this.resultBuilder,
-      verify: (request) => this.verificationExecutor.run(request),
+      verify: async (request) => {
+        const startedAt = Date.now()
+        this.log('verification.start', request)
+        try {
+          const result = await this.verificationExecutor.run(request)
+          this.log('verification.end', { durationMs: Date.now() - startedAt, result })
+          return result
+        } catch (error) {
+          this.log('verification.error', { durationMs: Date.now() - startedAt, error: messageOf(error) })
+          throw error
+        }
+      },
       isCancellationRequested: () => this.cancelRequested,
       takeEvents: () => {
         const events = this.pendingEvidenceEvents
@@ -100,6 +113,8 @@ export class WindowController {
       this.lease = nextLease
       this.workspacePath = workspacePath
       this.session = nextSession
+      this.logger = new SessionLogger(nextSession.id)
+      this.log('session.open', { title: nextSession.title, workspacePath, dshSessionId: nextSession.dshSessionId, permission: nextSession.permission })
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
       this.error = undefined
@@ -173,6 +188,8 @@ export class WindowController {
     if (!settings.provider || !settings.model) throw new Error('请先配置模型 Provider 和 Model。')
 
     const submittedRevision = this.store.getDraftWithRevision(session.id).revision
+    const submitStartedAt = Date.now()
+    this.log('submit.start', { mode, spec, provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl, permission: session.permission, dshSessionId: session.dshSessionId })
     this.cancelRequested = false
     this.running = true
     this.error = undefined
@@ -182,8 +199,10 @@ export class WindowController {
 
     try {
       const result = await this.engine.submit({ session, mode, spec })
+      this.log('submit.end', { mode, outcome: result.outcome, roundId: result.roundId, durationMs: Date.now() - submitStartedAt })
       if (result.outcome !== 'interrupted') this.store.clearDraftIfRevision(session.id, submittedRevision)
     } catch (error) {
+      this.log('submit.error', { mode, durationMs: Date.now() - submitStartedAt, cancelled: this.cancelRequested, error: messageOf(error) })
       if (!this.cancelRequested) {
         this.error = error instanceof Error ? error.message : String(error)
         await this.closeRuntime()
@@ -191,6 +210,7 @@ export class WindowController {
       }
       this.error = undefined
     } finally {
+      this.log('submit.finalize', { mode, durationMs: Date.now() - submitStartedAt, cancelRequested: this.cancelRequested })
       this.running = false
       this.cancelRequested = false
       // Keep the last runner events long enough for the close animation and
@@ -205,8 +225,10 @@ export class WindowController {
     if (!this.running) return false
     if (this.cancelRequested) return true
     this.cancelRequested = true
+    this.log('cancel.requested', { dshSessionId: this.session?.dshSessionId })
     const runtime = this.runtime
-    if (runtime) await runtime.cancelTurn()
+    const delivered = runtime ? await runtime.cancelTurn() : false
+    this.log('cancel.result', { delivered, dshSessionId: this.session?.dshSessionId })
     await this.emitSnapshot()
     return true
   }
@@ -245,15 +267,18 @@ export class WindowController {
       settings,
       credential: await this.vault.getCredential(),
       permission: session.permission,
-      onEvent: (event) => this.appendRunnerEvent(event)
+      onEvent: (event) => this.appendRunnerEvent(event),
+      onDebug: (type, payload) => this.log(type, payload)
     })
     const existing = this.store.getDshSessionId(session.id)
+    this.log('runtime.ensure', { existingDshSessionId: existing, provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl })
     const started = await runtime.start(existing)
     if (!existing) {
       this.store.setDshSessionId(session.id, started.sessionId)
       this.session = { ...session, dshSessionId: started.sessionId, kind: session.kind === 'new' ? 'legacy' : session.kind }
     }
     this.runtime = runtime
+    this.log('runtime.ready', { dshSessionId: started.sessionId })
     return runtime
   }
 
@@ -265,6 +290,8 @@ export class WindowController {
 
   private async releaseCurrent(): Promise<void> {
     await this.closeRuntime()
+    await this.logger?.flush()
+    this.logger = null
     const lease = this.lease
     this.lease = null
     if (lease) {
@@ -286,6 +313,7 @@ export class WindowController {
   }
 
   private appendRunnerEvent(event: RunnerEvent): void {
+    this.log('runner.event', event)
     this.runnerEvents.push(event)
     if (this.runnerEvents.length > 200) this.runnerEvents.shift()
     this.pendingEvidenceEvents.push(event)
@@ -293,9 +321,17 @@ export class WindowController {
     void this.emitSnapshot()
   }
 
+  private log(type: string, payload?: unknown): void {
+    this.logger?.write(type, payload)
+  }
+
   private async emitSnapshot(): Promise<WorkspaceSnapshot> {
     const snapshot = await this.getSnapshot()
     if (!this.window.isDestroyed()) this.window.webContents.send(IPC.snapshotChanged, snapshot)
     return snapshot
   }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
