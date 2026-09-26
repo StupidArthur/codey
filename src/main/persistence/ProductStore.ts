@@ -234,7 +234,7 @@ export class ProductStore {
   /**
    * Prepared statements are cached and kept alive for the lifetime of the
    * store. Creating hundreds of short-lived statements (one per snapshot
-   * projection) while a DSH turn streamed events caused GC to finalize the
+   * projection) while an agent turn streamed events caused GC to finalize the
    * native Statement handles mid-turn, which aborted the Electron main process.
    */
   private stmt(sql: string): StatementSync {
