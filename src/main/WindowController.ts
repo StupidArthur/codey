@@ -6,7 +6,7 @@ import type {
   SessionListResult, SessionSummary, WorkspaceSnapshot
 } from '../shared/contracts'
 import { IPC } from '../shared/contracts'
-import { DshRuntime } from './dsh/DshRuntime'
+import { DshRuntime, type DshRuntimeComposition } from './dsh/DshRuntime'
 import { SessionDiscovery, type DiscoveredDshSession } from './dsh/SessionDiscovery'
 import { historyStateFor, mergeSessions } from './dsh/sessionMerge'
 import { EvidenceCollector } from './evidence/EvidenceCollector'
@@ -22,6 +22,7 @@ export class WindowController {
   private workspacePath: string | null = null
   private session: SessionSummary | null = null
   private runtime: DshRuntime | null = null
+  private runtimeComposition: DshRuntimeComposition | null = null
   private lease: SessionLease | null = null
   private running = false
   private cancelRequested = false
@@ -45,7 +46,7 @@ export class WindowController {
   ) {
     this.engine = new RoundEngine({
       store,
-      ensureRuntime: () => this.ensureRuntime(),
+      ensureRuntime: (mode) => this.ensureRuntime(mode),
       evidence: this.evidence,
       resultBuilder: this.resultBuilder,
       verify: async (request) => {
@@ -270,35 +271,56 @@ export class WindowController {
     this.lease.assertHeld()
   }
 
-  private async ensureRuntime(): Promise<DshRuntime> {
+  private async ensureRuntime(mode: RoundMode): Promise<DshRuntime> {
     this.assertOwnership()
-    if (this.runtime) return this.runtime
+    const composition: DshRuntimeComposition = mode === 'vibe' ? 'minimal' : 'full'
+
+    if (this.runtime && this.runtimeComposition === composition) return this.runtime
+    if (this.runtime && this.runtimeComposition !== composition) {
+      this.log('runtime.switch', { from: this.runtimeComposition, to: composition, mode })
+      await this.closeRuntime()
+    }
+
     const session = this.requireSession()
     const settings = await this.getModelSettings()
     const runtime = new DshRuntime({
       workspacePath: session.workspacePath,
       settings,
+      composition,
       credential: await this.vault.getCredential(),
       permission: session.permission,
       onEvent: (event) => this.appendRunnerEvent(event),
       onDebug: (type, payload) => this.log(type, payload)
     })
     const existing = this.store.getDshSessionId(session.id)
-    this.log('runtime.ensure', { existingDshSessionId: existing, provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl })
+    this.log('runtime.ensure', {
+      mode,
+      composition,
+      existingDshSessionId: existing,
+      provider: settings.provider,
+      model: settings.model,
+      baseUrl: settings.baseUrl
+    })
     const started = await runtime.start(existing)
     if (!existing) {
       this.store.setDshSessionId(session.id, started.sessionId)
       this.session = { ...session, dshSessionId: started.sessionId, kind: session.kind === 'new' ? 'legacy' : session.kind }
     }
     this.runtime = runtime
-    this.log('runtime.ready', { dshSessionId: started.sessionId })
+    this.runtimeComposition = composition
+    this.log('runtime.ready', { mode, composition, dshSessionId: started.sessionId })
     return runtime
   }
 
   private async closeRuntime(): Promise<void> {
     const runtime = this.runtime
+    const composition = this.runtimeComposition
     this.runtime = null
-    if (runtime) await runtime.close()
+    this.runtimeComposition = null
+    if (runtime) {
+      this.log('runtime.dispose', { composition })
+      await runtime.close()
+    }
   }
 
   private async releaseCurrent(): Promise<void> {
