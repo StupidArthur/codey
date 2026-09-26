@@ -313,7 +313,7 @@ export class OpenCodeRuntime implements AgentRuntime {
 
   private async consumeEvents(signal: AbortSignal): Promise<void> {
     const response = await fetch(`${this.requireServerUrl()}/event`, {
-      headers: { Accept: 'text/event-stream', Authorization: this.requireServerAuth() },
+      headers: { Accept: 'text/event-stream', Authorization: this.requireServerAuth(), 'x-opencode-directory': encodeURIComponent(this.options.workspacePath) },
       signal
     })
     if (!response.ok || !response.body) {
@@ -506,6 +506,7 @@ export class OpenCodeRuntime implements AgentRuntime {
       headers: {
         Accept: 'application/json',
         Authorization: this.requireServerAuth(),
+        'x-opencode-directory': encodeURIComponent(this.options.workspacePath),
         ...(init.body ? { 'Content-Type': 'application/json' } : {}),
         ...(init.headers ?? {})
       }
