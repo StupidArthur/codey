@@ -50,6 +50,8 @@ export interface SessionDiscoveryOptions {
   listTimeoutMs?: number
   /** Safety bound on pagination requests. */
   maxPages?: number
+  /** Reuse a recent public session/list result for the same workspace. */
+  cacheTtlMs?: number
 }
 
 const require = createRequire(__filename)
@@ -61,6 +63,9 @@ export function resolveInstalledDshBin(): string {
 }
 
 export class SessionDiscovery {
+  private readonly cache = new Map<string, { at: number; sessions: DiscoveredDshSession[] }>()
+  private readonly inflight = new Map<string, Promise<DiscoveredDshSession[]>>()
+
   constructor(private readonly options: SessionDiscoveryOptions = {}) {}
 
   /**
@@ -69,7 +74,21 @@ export class SessionDiscovery {
    */
   async listByWorkspace(workspacePath: string): Promise<DiscoveredDshSession[]> {
     const canonical = await canonicalWorkspace(workspacePath)
-    return this.runAcp(canonical)
+    const ttl = this.options.cacheTtlMs ?? 30_000
+    const cached = this.cache.get(canonical)
+    if (cached && Date.now() - cached.at <= ttl) return [...cached.sessions]
+
+    const pending = this.inflight.get(canonical)
+    if (pending) return [...await pending]
+
+    const task = this.runAcp(canonical)
+      .then((sessions) => {
+        this.cache.set(canonical, { at: Date.now(), sessions })
+        return sessions
+      })
+      .finally(() => this.inflight.delete(canonical))
+    this.inflight.set(canonical, task)
+    return [...await task]
   }
 
   /** Legacy transcript replay is not part of the public ACP/SDK surface. */
@@ -100,11 +119,6 @@ export class SessionDiscovery {
       stderr = (stderr + chunk.toString()).slice(-4096)
     })
 
-    const exited = new Promise<void>((resolve) => {
-      child.once('exit', () => resolve())
-      child.once('error', () => resolve())
-    })
-
     try {
       const acp = await import('@agentclientprotocol/sdk')
       const stream = acp.ndJsonStream(
@@ -128,13 +142,15 @@ export class SessionDiscovery {
         { cause: error }
       )
     } finally {
-      // Closing stdin binds the ACP app's bounded shutdown; then reap the child.
+      // Discovery is read-only and the result is already materialized here.
+      // Do not make the UI wait for DSH process teardown: close the transport,
+      // terminate the short-lived discovery process, and let Node reap it.
       try { child.stdin.end() } catch { /* already closed */ }
-      const reaped = await Promise.race([
-        exited.then(() => true),
-        delay(this.options.initializeTimeoutMs ?? 8_000).then(() => false)
-      ])
-      if (!reaped) child.kill('SIGKILL')
+      try { child.stdout.destroy() } catch { /* already closed */ }
+      try { child.stderr.destroy() } catch { /* already closed */ }
+      if (child.exitCode === null && !child.killed) {
+        try { child.kill() } catch { /* already exited */ }
+      }
     }
   }
 
