@@ -19,8 +19,12 @@ export const TURN_DEADLINE_MESSAGE = 'DSH turn deadline exceeded (cancelled via 
 export const TURN_CANCELLED_MESSAGE = 'DSH turn cancelled by user'
 const TURN_CANCEL_GRACE_MS = 8_000
 
+export type DshRuntimeComposition = 'full' | 'minimal'
+
 export interface DshRuntimeOptions {
   workspacePath: string
+  /** Full ACP agent or the official sdk-minimal agent kernel behind ACP. */
+  composition?: DshRuntimeComposition
   settings: ModelSettings
   credential?: string
   /** Session-level sandbox preset; enforced by DSH via DSH_PERMISSION_MODE. */
@@ -36,7 +40,9 @@ export interface DshRuntimeOptions {
 
 /**
  * One window's execution path for one DSH Session, driven entirely by the
- * public ACP profile (`dsh --profile acp`).
+ * public ACP transport. Full mode boots the shipped `acp` profile; minimal
+ * mode boots the official `sdk-minimal` composition and replaces only its SDK
+ * stdio surface with the official ACP bridge.
  *
  * The SDK `sdk` profile cannot resume a persisted session (its server always
  * calls `agents.create`; see docs/dsh-upstream-resume-report.md), so execution
@@ -71,7 +77,9 @@ export class DshRuntime {
     }
     const provider = this.options.settings.provider.trim()
     const model = this.options.settings.model.trim()
-    this.debug('runtime.start.begin', { provider, model, workspacePath: this.options.workspacePath, resumeSessionId: sessionId })
+    const composition = this.options.composition ?? 'full'
+    const profile = composition === 'minimal' ? 'sdk-minimal' : 'acp'
+    this.debug('runtime.start.begin', { provider, model, composition, profile, workspacePath: this.options.workspacePath, resumeSessionId: sessionId })
     const baseUrl = this.options.settings.baseUrl?.trim()
     if (!provider || !model) throw new Error('Configure a model provider and model before starting DSH')
     const official = provider === 'deepseek-official'
@@ -84,7 +92,11 @@ export class DshRuntime {
     const dshBin = this.options.dshBin ?? resolveInstalledDshBin()
     this.patchDir = await mkdtemp(join(tmpdir(), 'temporal-acp-run-'))
     const patchPath = join(this.patchDir, 'profile.patch.yml')
-    await writeFile(patchPath, providerPatch({ provider, model, baseUrl: baseUrl ?? '', official }))
+    await writeFile(patchPath, runtimePatch({
+      provider, model, baseUrl: baseUrl ?? '', official,
+      composition,
+      permission: this.options.permission ?? 'workspace-write'
+    }))
 
     const env: NodeJS.ProcessEnv = { ...process.env }
     if (process.platform === 'win32' && process.versions.electron) {
@@ -107,7 +119,7 @@ export class DshRuntime {
 
     let child: ChildProcessWithoutNullStreams
     try {
-      child = spawn(process.execPath, [dshBin, '--profile', 'acp', '--patch', patchPath], {
+      child = spawn(process.execPath, [dshBin, '--profile', profile, '--patch', patchPath], {
         cwd: this.options.workspacePath,
         env,
         stdio: ['pipe', 'pipe', 'pipe']
@@ -117,7 +129,7 @@ export class DshRuntime {
       throw new Error(`Failed to launch DSH ACP runtime: ${messageOf(error)}`)
     }
     this.child = child
-    this.debug('runtime.process.spawned', { pid: child.pid, dshBin, patchPath })
+    this.debug('runtime.process.spawned', { pid: child.pid, dshBin, patchPath, composition, profile })
     child.once('exit', (code, signal) => this.debug('runtime.process.exit', { pid: child.pid, code, signal }))
     child.once('error', (error) => this.debug('runtime.process.error', { pid: child.pid, error: messageOf(error) }))
     child.stderr.on('data', (chunk: Buffer) => {
@@ -356,12 +368,32 @@ function yamlScalar(value: string): string {
 }
 
 /**
- * Builds the DSH patch that selects `provider`/`model` for the ACP profile.
- * `deepseek-official` uses the shipped DeepSeek route. Any other provider is
- * mounted as a hand-declared `@deepseek-ai/dsh-llm-pi-ai` OpenAI-compatible
- * route pointing at `baseUrl`, so gateways like Volcengine ARK are pure config.
+ * Build the runtime patch.
+ *
+ * Full keeps the shipped ACP composition. Minimal reuses the shipped
+ * sdk-minimal complete agent tree verbatim and swaps only the protocol surface:
+ * SDK startup/server are disabled, then the official ACP startup + bridge are
+ * inserted. No Codey-authored agent prompt or tool roster is added.
  */
-function providerPatch(input: { provider: string; model: string; baseUrl: string; official: boolean }): string {
+function runtimePatch(input: {
+  provider: string
+  model: string
+  baseUrl: string
+  official: boolean
+  composition: DshRuntimeComposition
+  permission: PermissionPreset
+}): string {
+  return input.composition === 'minimal'
+    ? minimalAcpPatch(input)
+    : fullAcpPatch(input)
+}
+
+function fullAcpPatch(input: {
+  provider: string
+  model: string
+  baseUrl: string
+  official: boolean
+}): string {
   const acp = `- id: acp\n  config:\n    provider: ${yamlScalar(input.provider)}\n    model: ${yamlScalar(input.model)}\n`
   if (input.official) return acp
   return [
@@ -380,6 +412,58 @@ function providerPatch(input: { provider: string; model: string; baseUrl: string
     '            maxTokens: 32768',
     acp.trimEnd()
   ].join('\n') + '\n'
+}
+
+function minimalAcpPatch(input: {
+  provider: string
+  model: string
+  baseUrl: string
+  official: boolean
+  permission: PermissionPreset
+}): string {
+  const lines = [
+    '# Codey Vibe: official sdk-minimal agent kernel + official ACP transport.',
+    '- id: sdk-app-startup',
+    '  disabled: true',
+    '- id: sdk-jsonrpc-server',
+    '  disabled: true',
+    '- id: sandbox-policy',
+    '  config:',
+    `    mode: ${yamlScalar(input.permission)}`,
+    '    workspaceRoot: !!js process.cwd()',
+    '- insert:'
+  ]
+
+  if (!input.official) {
+    lines.push(
+      '    - id: llm-pi-ai',
+      "      name: '@deepseek-ai/dsh-llm-pi-ai'",
+      '      config:',
+      '        providers:',
+      `          ${yamlScalar(input.provider)}:`,
+      `            displayName: ${yamlScalar(input.provider)}`,
+      '            apiKeyEnv: TEMPORAL_LLM_API_KEY',
+      '            api: openai-completions',
+      `            baseURL: ${yamlScalar(input.baseUrl)}`,
+      '            models:',
+      `              - id: ${yamlScalar(input.model)}`,
+      `                name: ${yamlScalar(input.model)}`,
+      '                contextWindow: 131072',
+      '                maxTokens: 32768'
+    )
+  }
+
+  lines.push(
+    '    - id: acp-app-startup',
+    "      name: '@deepseek-ai/dsh-acp-app'",
+    '    - id: acp',
+    "      name: '@deepseek-ai/dsh-acp'",
+    '      inject: [acpAppStartup]',
+    '      config:',
+    `        provider: ${yamlScalar(input.provider)}`,
+    `        model: ${yamlScalar(input.model)}`
+  )
+  return lines.join('\n') + '\n'
 }
 
 function messageOf(error: unknown): string {
