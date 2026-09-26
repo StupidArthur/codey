@@ -189,6 +189,7 @@ export interface TemporalApi {
   getSnapshot(): Promise<WorkspaceSnapshot>
   saveDraft(draft: string, mode: RoundMode): Promise<void>
   submit(spec: string, mode: RoundMode): Promise<void>
+  cancelRun(): Promise<boolean>
   endRound(): Promise<void>
   setPermission(preset: PermissionPreset): Promise<void>
   getModelSettings(): Promise<ModelSettings>
@@ -203,6 +204,7 @@ export const IPC = {
   getSnapshot: 'workspace:snapshot',
   saveDraft: 'workspace:save-draft',
   submit: 'round:submit',
+  cancelRun: 'round:cancel',
   endRound: 'round:end',
   setPermission: 'settings:permission:set',
   getModelSettings: 'settings:model:get',
