@@ -226,10 +226,10 @@ function firstParagraph(text: string): string {
  *  exit code: built-in checks report the fact, shell checks report exit 0.
  *  Sandbox runs state their true source — the product verified the result
  *  artifacts (and the input snapshot the check was requested against) that the
- *  model produced inside DSH's confined execution; it never presents reading
+ *  model produced inside the active agent backend's tool execution; it never presents reading
  *  a `0` from the exit file as a directly observed child-process exit. */
 function passedDetail(run: VerificationRun): string {
-  if (run.requestId) return 'passed (DSH 沙盒检查报告；产品核实结果产物及输入快照)'
+  if (run.requestId) return 'passed (模型执行检查报告；产品核实结果产物及输入快照)'
   if (run.method === 'builtin') {
     const fact = run.facts[0]
     if (fact?.kind === 'file-exists') return 'passed (file exists)'
