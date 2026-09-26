@@ -3,17 +3,21 @@ import { join } from 'node:path'
 
 export const DEFAULT_SESSION_LOG_DIR = 'D:\\codey-log'
 const MAX_LOG_STRING = 12_000
+const FLUSH_INTERVAL_MS = 120
+const FLUSH_BATCH_SIZE = 64
 
 /**
  * Append-only, per-product-session diagnostic log.
  *
  * JSONL keeps the file readable while preserving enough structure for later
- * analysis. Writes are serialized so high-frequency ACP updates stay ordered.
- * Logging is best-effort and must never interrupt the user's run.
+ * analysis. Writes are batched and serialized so diagnostics add minimal I/O
+ * overhead and never reorder high-frequency ACP updates.
  */
 export class SessionLogger {
   readonly filePath: string
   private queue: Promise<void>
+  private buffer: string[] = []
+  private timer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
     readonly sessionId: string,
@@ -31,17 +35,39 @@ export class SessionLogger {
         type,
         ...(payload === undefined ? {} : { payload: redact(payload) })
       }
-      const line = JSON.stringify(record) + '\n'
-      this.queue = this.queue
-        .then(() => appendFile(this.filePath, line, { encoding: 'utf8' }))
-        .catch(() => undefined)
+      this.buffer.push(JSON.stringify(record) + '\n')
+      if (this.buffer.length >= FLUSH_BATCH_SIZE) this.flushBatch()
+      else this.scheduleFlush()
     } catch {
       // Diagnostics must never break the agent run.
     }
   }
 
   async flush(): Promise<void> {
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = undefined
+    }
+    this.flushBatch()
     await this.queue
+  }
+
+  private scheduleFlush(): void {
+    if (this.timer) return
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      this.flushBatch()
+    }, FLUSH_INTERVAL_MS)
+    this.timer.unref?.()
+  }
+
+  private flushBatch(): void {
+    if (this.buffer.length === 0) return
+    const batch = this.buffer.join('')
+    this.buffer = []
+    this.queue = this.queue
+      .then(() => appendFile(this.filePath, batch, { encoding: 'utf8' }))
+      .catch(() => undefined)
   }
 }
 
