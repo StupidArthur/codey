@@ -34,6 +34,7 @@ export class WindowController {
   private activeRunId: string | undefined
   private activeRunStartedAt: number | undefined
   private runnerSnapshotTimer: ReturnType<typeof setTimeout> | undefined
+  private runtimePrewarmTimer: ReturnType<typeof setTimeout> | undefined
   private readonly discovery = new SessionDiscovery()
   private readonly evidence = new EvidenceCollector()
   private readonly resultBuilder = new ResultBuilder()
@@ -130,7 +131,7 @@ export class WindowController {
       this.pendingEvidenceEvents = []
       this.error = undefined
       const snapshot = await this.emitSnapshot()
-      this.prewarmRuntime(snapshot.mode, 'session.open')
+      this.scheduleRuntimePrewarm(snapshot.mode, 'session.open', 800)
       return snapshot
     } catch (error) {
       try { nextLease.release() } catch { /* best effort */ }
@@ -164,6 +165,7 @@ export class WindowController {
     this.assertOwnership()
     const session = this.requireSession()
     this.store.saveDraft(session.id, draft, mode)
+    this.cancelScheduledPrewarm()
     this.prewarmRuntime(mode, 'draft.save')
     await this.emitSnapshot()
   }
@@ -203,6 +205,7 @@ export class WindowController {
     const settings = await this.getModelSettings()
     if (!settings.provider || !settings.model) throw new Error('请先配置模型 Provider 和 Model。')
 
+    this.cancelScheduledPrewarm()
     const submittedRevision = this.store.getDraftWithRevision(session.id).revision
     const submitStartedAt = Date.now()
     this.activeRunId = randomUUID()
@@ -279,6 +282,21 @@ export class WindowController {
 
   private compositionForMode(mode: RoundMode): DshRuntimeComposition {
     return mode === 'vibe' ? 'minimal' : 'full'
+  }
+
+  private scheduleRuntimePrewarm(mode: RoundMode, reason: string, delayMs: number): void {
+    this.cancelScheduledPrewarm()
+    this.runtimePrewarmTimer = setTimeout(() => {
+      this.runtimePrewarmTimer = undefined
+      this.prewarmRuntime(mode, reason)
+    }, delayMs)
+    this.runtimePrewarmTimer.unref?.()
+  }
+
+  private cancelScheduledPrewarm(): void {
+    if (!this.runtimePrewarmTimer) return
+    clearTimeout(this.runtimePrewarmTimer)
+    this.runtimePrewarmTimer = undefined
   }
 
   /**
@@ -383,6 +401,7 @@ export class WindowController {
   }
 
   private async releaseCurrent(): Promise<void> {
+    this.cancelScheduledPrewarm()
     if (this.runnerSnapshotTimer) {
       clearTimeout(this.runnerSnapshotTimer)
       this.runnerSnapshotTimer = undefined
