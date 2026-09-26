@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { EditorView, basicSetup } from 'codemirror'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { EvidenceSummary, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
+import type { EvidenceSummary, ModelSettings, PermissionPreset, ResultSummary, RoundDetail, RoundMode, RunnerEvent, SessionSummary, WorkspaceSnapshot } from '../../shared/contracts'
 import './styles.css'
 
 const modeLabels: Record<RoundMode, string> = { plan: 'Plan', vibe: 'Vibe', loop: 'Loop' }
@@ -143,6 +143,36 @@ function CodeMirrorEditor({ value, onChange, onFocus, onBlur }: {
   return <div className="code-editor" ref={host} />
 }
 
+function findActiveRunnerToolId(events: RunnerEvent[], running: boolean): string | null {
+  if (!running) return null
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.kind === 'error' && event.message.includes(' · failed · ')) return null
+    if (event.kind !== 'tool') continue
+    if (event.message.includes(' · completed · ') || event.message.includes(' · failed · ')) return null
+    return event.id
+  }
+  return null
+}
+
+function renderRunnerMessage(event: RunnerEvent, activeToolId: string | null, now: number): string {
+  if (event.id !== activeToolId) return event.message
+  const elapsedMs = Math.max(0, now - new Date(event.at).getTime())
+  const newline = event.message.indexOf('\n')
+  const elapsed = formatRunnerDuration(elapsedMs)
+  return newline < 0
+    ? `${event.message} · running ${elapsed}`
+    : `${event.message.slice(0, newline)} · running ${elapsed}${event.message.slice(newline)}`
+}
+
+function formatRunnerDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return `${minutes}m ${rest.toString().padStart(2, '0')}s`
+}
+
 function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
@@ -156,6 +186,7 @@ function App(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sourceView, setSourceView] = useState(true)
   const [runnerOpen, setRunnerOpen] = useState(false)
+  const [runnerNow, setRunnerNow] = useState(() => Date.now())
   const [cancelling, setCancelling] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -330,6 +361,14 @@ function App(): React.JSX.Element {
 
   const selectedRound = snapshot?.rounds.find(round => round.id === selectedId)
   const runnerEvents = snapshot?.runnerEvents ?? []
+  const activeRunnerToolId = findActiveRunnerToolId(runnerEvents, snapshot?.running === true)
+
+  useEffect(() => {
+    if (!runnerOpen || snapshot?.running !== true) return
+    setRunnerNow(Date.now())
+    const timer = window.setInterval(() => setRunnerNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [runnerOpen, snapshot?.running])
 
   useEffect(() => {
     if (!runnerOpen || !runnerFollowLatest.current) return
@@ -406,7 +445,7 @@ function App(): React.JSX.Element {
               <div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{cancelling ? 'Stopping…' : snapshot.running ? 'Running' : 'Runner'}</strong><span>{modeLabels[mode]}</span></div>
               <div className="runner-actions">{snapshot.running && <button className="runner-stop" onClick={() => void cancelRun()} disabled={cancelling} aria-label="停止当前运行">{cancelling ? '停止中…' : '停止'}</button>}<button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div>
             </div>
-            <div className="runner-events" ref={runnerEventsHost} onScroll={handleRunnerScroll} role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span className="runner-prefix">{event.kind}</span><span className="runner-message">{event.message}</span></div>) : <p className="runner-empty">等待运行事件…</p>}</div>
+            <div className="runner-events" ref={runnerEventsHost} onScroll={handleRunnerScroll} role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span className="runner-prefix">{event.kind}</span><span className="runner-message">{renderRunnerMessage(event, activeRunnerToolId, runnerNow)}</span></div>) : <p className="runner-empty">等待运行事件…</p>}</div>
           </section>
         </section>
         <section className="spec-pane" aria-label="Spec 编辑器"><div className="spec-toolbar"><div className="segmented" aria-label="运行模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={snapshot.running || busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
