@@ -156,6 +156,7 @@ function App(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sourceView, setSourceView] = useState(true)
   const [runnerOpen, setRunnerOpen] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<ModelSettings | null>(null)
@@ -184,7 +185,10 @@ function App(): React.JSX.Element {
       setSelectedId(next.rounds.at(-1)?.id ?? null)
     }
     if (next.running && !previous?.running) setRunnerOpen(true)
-    if (previous?.running && !next.running) setRunnerOpen(false)
+    if (previous?.running && !next.running) {
+      setRunnerOpen(false)
+      setCancelling(false)
+    }
   }
 
   useEffect(() => {
@@ -248,6 +252,7 @@ function App(): React.JSX.Element {
     if (draftTimer.current) clearTimeout(draftTimer.current)
     setBusy(true)
     setError('')
+    setCancelling(false)
     setRunnerOpen(true)
     try {
       await window.temporal.saveDraft(latest.current.draft, latest.current.mode)
@@ -259,6 +264,19 @@ function App(): React.JSX.Element {
       applySnapshot(await window.temporal.getSnapshot())
     } catch (e) { setError(messageOf(e)) }
     finally { setBusy(false) }
+  }
+
+  async function cancelRun(): Promise<void> {
+    if (!snapshot?.running || cancelling) return
+    setCancelling(true)
+    setError('')
+    try {
+      const accepted = await window.temporal.cancelRun()
+      if (!accepted) setCancelling(false)
+    } catch (e) {
+      setCancelling(false)
+      setError(messageOf(e))
+    }
   }
 
   async function endRound(): Promise<void> {
@@ -353,13 +371,21 @@ function App(): React.JSX.Element {
               <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}</small></span>
             </button>)}
           </nav>
-          {snapshot.running && !runnerOpen && <button className="runner-mini" onClick={() => setRunnerOpen(true)} aria-label="展开 Runner"><span className="live-dot"/><span className="runner-mini-label">正在运行 · 查看过程</span></button>}
+          <button className={`runner-mini ${snapshot.running && !runnerOpen ? 'visible' : ''}`} onClick={() => setRunnerOpen(true)} aria-label="展开 Runner" tabIndex={snapshot.running && !runnerOpen ? 0 : -1}><span className="live-dot"/><span className="runner-mini-label">{cancelling ? '正在停止…' : '正在运行 · 查看过程'}</span></button>
         </aside>
         <section className="result-pane" aria-label="结果页面">
-          {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} />
-            : snapshot.historyState === 'legacy-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">EXISTING DSH SESSION</div><h1>Historical transcript unavailable</h1><p>该 DSH Session 的旧对话无法通过公开接口读取。旧历史只读继承、不重建 Temporal Round；第一次提交将沿用此 Session 并创建 Round 1。</p></div></article>
-            : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
-          {runnerOpen && <section className="runner-panel" aria-label="Runner 事件"><div className="runner-header"><div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{snapshot.running ? 'Running' : 'Runner'}</strong><span>{modeLabels[mode]}</span></div><button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div><div className="runner-events" role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span>{event.kind}</span><p>{event.message}</p></div>) : <p className="runner-empty">等待运行事件…</p>}</div></section>}
+          <div className="result-scroll">
+            {selectedRound ? <RoundView key={selectedRound.id} round={selectedRound} />
+              : snapshot.historyState === 'legacy-unavailable' ? <article className="document"><div className="document-header"><div className="eyebrow">EXISTING DSH SESSION</div><h1>Historical transcript unavailable</h1><p>该 DSH Session 的旧对话无法通过公开接口读取。旧历史只读继承、不重建 Temporal Round；第一次提交将沿用此 Session 并创建 Round 1。</p></div></article>
+              : <div className="blank-state"><div className="blank-symbol">⌁</div><h2>暂无结果</h2><p>在右侧写下目标，选择模式并提交。</p></div>}
+          </div>
+          <section className={`runner-panel ${runnerOpen ? 'open' : ''} ${cancelling ? 'stopping' : ''}`} aria-label="Runner 事件" aria-hidden={!runnerOpen}>
+            <div className="runner-header">
+              <div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{cancelling ? 'Stopping…' : snapshot.running ? 'Running' : 'Runner'}</strong><span>{modeLabels[mode]}</span></div>
+              <div className="runner-actions">{snapshot.running && <button className="runner-stop" onClick={() => void cancelRun()} disabled={cancelling} aria-label="停止当前运行">{cancelling ? '停止中…' : '停止'}</button>}<button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div>
+            </div>
+            <div className="runner-events" role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span>{event.kind}</span><p>{event.message}</p></div>) : <p className="runner-empty">等待运行事件…</p>}</div>
+          </section>
         </section>
         <section className="spec-pane" aria-label="Spec 编辑器"><div className="spec-toolbar"><div className="segmented" aria-label="运行模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={snapshot.running || busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
           <div className="spec-body"><div className={`editor-container ${sourceView ? '' : 'hidden'}`}><CodeMirrorEditor key={snapshot.session.id} value={draft} onFocus={() => { editorFocused.current = true }} onBlur={() => { editorFocused.current = false }} onChange={value => queueDraft(value, mode)}/>{!draft && <span className="editor-placeholder" aria-hidden="true"># Spec<br/><br/>描述希望完成的工作…</span>}</div><div className={`spec-preview markdown-body ${sourceView ? 'hidden' : ''}`}>{draft.trim() ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown> : <p className="muted">Spec 预览会显示在这里。</p>}</div></div>
