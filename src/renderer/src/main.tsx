@@ -166,6 +166,8 @@ function App(): React.JSX.Element {
   const localDraftDirty = useRef(false)
   const snapshotRef = useRef<WorkspaceSnapshot | null>(null)
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const runnerEventsHost = useRef<HTMLDivElement>(null)
+  const runnerFollowLatest = useRef(true)
   const latest = useRef({ draft, mode })
   latest.current = { draft, mode }
 
@@ -184,7 +186,10 @@ function App(): React.JSX.Element {
     } else if (previous && next.rounds.length > previous.rounds.length) {
       setSelectedId(next.rounds.at(-1)?.id ?? null)
     }
-    if (next.running && !previous?.running) setRunnerOpen(true)
+    if (next.running && !previous?.running) {
+      runnerFollowLatest.current = true
+      setRunnerOpen(true)
+    }
     if (previous?.running && !next.running) {
       setRunnerOpen(false)
       setCancelling(false)
@@ -326,6 +331,23 @@ function App(): React.JSX.Element {
   const selectedRound = snapshot?.rounds.find(round => round.id === selectedId)
   const runnerEvents = snapshot?.runnerEvents ?? []
 
+  useEffect(() => {
+    if (!runnerOpen || !runnerFollowLatest.current) return
+    const host = runnerEventsHost.current
+    if (!host) return
+    const frame = requestAnimationFrame(() => {
+      host.scrollTo({ top: host.scrollHeight, behavior: 'smooth' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [runnerEvents.length, runnerOpen])
+
+  function handleRunnerScroll(): void {
+    const host = runnerEventsHost.current
+    if (!host) return
+    const distanceFromBottom = host.scrollHeight - host.scrollTop - host.clientHeight
+    runnerFollowLatest.current = distanceFromBottom < 48
+  }
+
   return <div className="app-shell">
     <header className="titlebar">
       <div className="brand"><span className="brand-mark">T</span><span>Temporal Workspace</span></div>
@@ -371,7 +393,7 @@ function App(): React.JSX.Element {
               <span className="timeline-copy"><strong>{round.title || `Round ${round.sequence}`}</strong><small>{modeLabels[round.mode]}</small></span>
             </button>)}
           </nav>
-          <button className={`runner-mini ${snapshot.running && !runnerOpen ? 'visible' : ''}`} onClick={() => setRunnerOpen(true)} aria-label="展开 Runner" tabIndex={snapshot.running && !runnerOpen ? 0 : -1}><span className="live-dot"/><span className="runner-mini-label">{cancelling ? '正在停止…' : '正在运行 · 查看过程'}</span></button>
+          <button className={`runner-mini ${snapshot.running && !runnerOpen ? 'visible' : ''}`} onClick={() => { runnerFollowLatest.current = true; setRunnerOpen(true) }} aria-label="展开 Runner" tabIndex={snapshot.running && !runnerOpen ? 0 : -1}><span className="live-dot"/><span className="runner-mini-label">{cancelling ? '正在停止…' : '正在运行 · 查看过程'}</span></button>
         </aside>
         <section className="result-pane" aria-label="结果页面">
           <div className="result-scroll">
@@ -384,7 +406,7 @@ function App(): React.JSX.Element {
               <div><span className={snapshot.running ? 'live-dot' : 'idle-dot'}/><strong>{cancelling ? 'Stopping…' : snapshot.running ? 'Running' : 'Runner'}</strong><span>{modeLabels[mode]}</span></div>
               <div className="runner-actions">{snapshot.running && <button className="runner-stop" onClick={() => void cancelRun()} disabled={cancelling} aria-label="停止当前运行">{cancelling ? '停止中…' : '停止'}</button>}<button onClick={() => setRunnerOpen(false)} aria-label="收起 Runner">收起</button></div>
             </div>
-            <div className="runner-events" role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span>{event.kind}</span><p>{event.message}</p></div>) : <p className="runner-empty">等待运行事件…</p>}</div>
+            <div className="runner-events" ref={runnerEventsHost} onScroll={handleRunnerScroll} role="log" aria-live="polite">{runnerEvents.length ? runnerEvents.map(event => <div className={`runner-event event-${event.kind}`} key={event.id}><span className="runner-prefix">{event.kind}</span><span className="runner-message">{event.message}</span></div>) : <p className="runner-empty">等待运行事件…</p>}</div>
           </section>
         </section>
         <section className="spec-pane" aria-label="Spec 编辑器"><div className="spec-toolbar"><div className="segmented" aria-label="运行模式">{(['plan', 'vibe', 'loop'] as const).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => queueDraft(draft, item)} disabled={snapshot.running || busy} aria-pressed={mode === item}>{modeLabels[item]}</button>)}</div><div className="segmented" aria-label="编辑器视图"><button className={sourceView ? 'active' : ''} onClick={() => setSourceView(true)} aria-pressed={sourceView}>Source</button><button className={!sourceView ? 'active' : ''} onClick={() => setSourceView(false)} aria-pressed={!sourceView}>MD</button></div></div>
