@@ -113,7 +113,8 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
   position:relative;min-width:0;min-height:0;overflow:hidden;background:#efefec;
   background-image:radial-gradient(#d9d9d4 .65px,transparent .65px);background-size:14px 14px
 }
-.result-scroll{position:absolute;inset:0;overflow:auto;padding:34px 38px 120px;overscroll-behavior:contain}
+.result-scroll{position:absolute;inset:0;overflow:auto;padding:34px 38px 120px;overscroll-behavior:contain;scrollbar-width:none;-ms-overflow-style:none}
+.result-scroll::-webkit-scrollbar{width:0;height:0;display:none}
 .document{
   width:min(860px,100%);min-height:680px;margin:0 auto;background:#fff;border:1px solid #dfdfda;border-radius:2px;
   box-shadow:0 22px 55px rgba(28,28,24,.07),0 2px 8px rgba(28,28,24,.04);overflow:hidden
@@ -219,7 +220,8 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .runner-header button:hover{background:#30302d;color:#fff}
 .runner-stop{color:#ff9e92!important}
 .runner-stop:hover:not(:disabled){background:#422925!important;color:#fff!important}
-.runner-events{overflow:auto;min-height:0;padding:10px 11px 12px;font-family:var(--mono);font-size:9px}
+.runner-events{overflow:auto;min-height:0;padding:10px 11px 12px;font-family:var(--mono);font-size:9px;scrollbar-width:none;-ms-overflow-style:none}
+.runner-events::-webkit-scrollbar{width:0;height:0;display:none}
 .runner-event{display:grid;grid-template-columns:70px minmax(0,1fr);gap:10px;margin-bottom:6px;padding:7px 8px;border-radius:7px;background:#20201e}
 .runner-event span{color:#8eafe4;min-width:0}.runner-event p{margin:0;color:#d7d7d1;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}
 .event-error span{color:#ef8f83}.event-verification span{color:#d8c48c}.event-tool span{color:#91d5ab}.event-thinking span{color:#aaa9a3}
