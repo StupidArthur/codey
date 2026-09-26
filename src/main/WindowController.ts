@@ -193,7 +193,8 @@ export class WindowController {
     } finally {
       this.running = false
       this.cancelRequested = false
-      this.runnerEvents = []
+      // Keep the last runner events long enough for the close animation and
+      // post-run inspection. The next submit clears them before it starts.
       this.pendingEvidenceEvents = []
       await this.emitSnapshot()
     }
