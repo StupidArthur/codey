@@ -179,10 +179,15 @@ function formatToolStart(state: ToolDisplayState): string {
 function formatToolFinish(state: ToolDisplayState, failed: boolean): string {
   const label = toolLabel(state)
   const duration = Date.now() - state.startedAtMs
+  const input = summarizeInput(state.rawInput, state.locations)
   const result = summarizeOutput(state.rawOutput, state.content)
   const status = failed ? 'failed' : 'completed'
-  return result
-    ? `${label} · ${status} · ${formatDuration(duration)}\n↳ ${result}`
+  const details = [
+    input ? `input: ${input}` : '',
+    result ? `output: ${result}` : ''
+  ].filter(Boolean)
+  return details.length
+    ? `${label} · ${status} · ${formatDuration(duration)}\n↳ ${details.join('\n↳ ')}`
     : `${label} · ${status} · ${formatDuration(duration)}`
 }
 
