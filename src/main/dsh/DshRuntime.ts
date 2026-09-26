@@ -210,13 +210,16 @@ export class DshRuntime {
       return { text: projector.assistantText }
     } catch (error) {
       if (deadlineHit) {
+        this.debug('prompt.error', { promptSequence, durationMs: Date.now() - promptStartedAt, error: TURN_DEADLINE_MESSAGE })
         this.emit({ kind: 'error', message: TURN_DEADLINE_MESSAGE })
         throw new Error(TURN_DEADLINE_MESSAGE)
       }
       if (this.cancelRequested || messageOf(error) === TURN_CANCELLED_MESSAGE) {
+        this.debug('prompt.error', { promptSequence, durationMs: Date.now() - promptStartedAt, error: TURN_CANCELLED_MESSAGE })
         this.emit({ kind: 'status', message: 'run cancelled by user' })
         throw new Error(TURN_CANCELLED_MESSAGE)
       }
+      this.debug('prompt.error', { promptSequence, durationMs: Date.now() - promptStartedAt, error: messageOf(error) })
       this.emit({ kind: 'error', message: messageOf(error) })
       throw error
     } finally {
