@@ -1,17 +1,16 @@
-appId: ai.deepseek.temporal-workspace
-productName: Temporal Workspace
+appId: ai.opencode.temporal-workspace
+productName: Temporal Workspace OpenCode
 directories:
   output: release
-# Reuse the Electron distribution that `pnpm install` already downloaded instead
-# of fetching a second copy from GitHub during every packaging run.
 electronDist: node_modules/electron/dist
 files:
   - out/**
   - package.json
-# The SDK spawns the packaged DSH entry through Electron's Node mode. Its
-# package and transitive modules must remain ordinary filesystem files.
+extraResources:
+  - from: vendor/opencode/opencode.exe
+    to: opencode/opencode.exe
 asar: false
-npmRebuild: true
+npmRebuild: false
 win:
   target:
     - target: nsis
