@@ -11,8 +11,8 @@ import type { ResultBuilder } from '../result/ResultBuilder'
 
 export interface RoundEngineDeps {
   store: ProductStore
-  /** Lazily start the window's runtime and return it. */
-  ensureRuntime: () => Promise<DshRuntime>
+  /** Lazily start the runtime composition for this product mode. */
+  ensureRuntime: (mode: RoundMode) => Promise<DshRuntime>
   evidence: EvidenceCollector
   resultBuilder: ResultBuilder
   /** Returns and clears the runner events accumulated since the last execution. */
@@ -61,7 +61,7 @@ export class RoundEngine {
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
       throwIfCancelled(this.deps.isCancellationRequested)
-      const runtime = await this.deps.ensureRuntime()
+      const runtime = await this.deps.ensureRuntime(mode)
       throwIfCancelled(this.deps.isCancellationRequested)
       const baselineStartedAt = Date.now()
       this.deps.onDiagnostic?.('evidence.baseline.start', { mode, roundId: round.id })
@@ -129,7 +129,7 @@ export class RoundEngine {
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
       throwIfCancelled(this.deps.isCancellationRequested)
-      const runtime = await this.deps.ensureRuntime()
+      const runtime = await this.deps.ensureRuntime('loop')
       throwIfCancelled(this.deps.isCancellationRequested)
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
