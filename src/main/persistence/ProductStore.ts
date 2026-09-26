@@ -62,6 +62,12 @@ export interface EvidenceRecord {
   valid?: boolean
   turn?: number
   toolCallId?: string
+  /** Sandbox checks only: the nonce of the request that produced this run. */
+  requestId?: string
+  /** Sandbox checks only: the input fingerprint the run was requested against. */
+  inputFingerprint?: string
+  /** Stable check-object identity (`sandbox:<kind>`) across re-runs. */
+  checkObject?: string
 }
 
 export interface ResultDocument {
@@ -201,6 +207,11 @@ const migrations = [
   `
     ALTER TABLE round_evidence ADD COLUMN facts TEXT;
     ALTER TABLE round_evidence ADD COLUMN denial TEXT;
+  `,
+  `
+    ALTER TABLE round_evidence ADD COLUMN request_id TEXT;
+    ALTER TABLE round_evidence ADD COLUMN input_fingerprint TEXT;
+    ALTER TABLE round_evidence ADD COLUMN check_object TEXT;
   `
 ] as const
 
@@ -509,13 +520,14 @@ export class ProductStore {
 
   saveEvidence(roundId: string, evidence: EvidenceRecord): void {
     this.stmt(`
-      INSERT INTO round_evidence(id, round_id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id, facts, denial)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO round_evidence(id, round_id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id, facts, denial, request_id, input_fingerprint, check_object)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET round_id = excluded.round_id, label = excluded.label,
         detail = excluded.detail, outcome = excluded.outcome, provenance = excluded.provenance,
         observed_at = excluded.observed_at, command = excluded.command, exit_code = excluded.exit_code,
         targets = excluded.targets, covers = excluded.covers, valid = excluded.valid,
-        turn = excluded.turn, tool_call_id = excluded.tool_call_id, facts = excluded.facts, denial = excluded.denial
+        turn = excluded.turn, tool_call_id = excluded.tool_call_id, facts = excluded.facts, denial = excluded.denial,
+        request_id = excluded.request_id, input_fingerprint = excluded.input_fingerprint, check_object = excluded.check_object
     `).run(evidence.id, roundId, evidence.kind, evidence.label, evidence.detail,
       evidence.outcome, evidence.provenance, evidence.observedAt,
       evidence.command ?? null, evidence.exitCode ?? null,
@@ -524,17 +536,19 @@ export class ProductStore {
       evidence.valid === undefined ? null : (evidence.valid ? 1 : 0),
       evidence.turn ?? null, evidence.toolCallId ?? null,
       evidence.facts ? JSON.stringify(evidence.facts) : null,
-      evidence.denial ?? null)
+      evidence.denial ?? null,
+      evidence.requestId ?? null, evidence.inputFingerprint ?? null, evidence.checkObject ?? null)
   }
 
   listEvidence(roundId: string): EvidenceRecord[] {
     const rows = this.stmt(`
-      SELECT id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id, facts, denial
+      SELECT id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id, facts, denial, request_id, input_fingerprint, check_object
       FROM round_evidence WHERE round_id = ? ORDER BY observed_at, id
     `).all(roundId) as Array<{ id: string; kind: EvidenceRecord['kind']; label: string; detail: string;
       outcome: EvidenceRecord['outcome']; provenance: EvidenceRecord['provenance']; observed_at: string;
       command: string | null; exit_code: number | null; targets: string | null; covers: string | null;
-      valid: number | null; turn: number | null; tool_call_id: string | null; facts: string | null; denial: string | null }>
+      valid: number | null; turn: number | null; tool_call_id: string | null; facts: string | null; denial: string | null;
+      request_id: string | null; input_fingerprint: string | null; check_object: string | null }>
     return rows.map((row) => {
       const record: EvidenceRecord = {
         id: row.id, kind: row.kind, label: row.label,
@@ -550,6 +564,9 @@ export class ProductStore {
       if (row.valid !== null) record.valid = row.valid === 1
       if (row.turn !== null) record.turn = row.turn
       if (row.tool_call_id !== null) record.toolCallId = row.tool_call_id
+      if (row.request_id !== null) record.requestId = row.request_id
+      if (row.input_fingerprint !== null) record.inputFingerprint = row.input_fingerprint
+      if (row.check_object !== null) record.checkObject = row.check_object
       return record
     })
   }

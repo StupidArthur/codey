@@ -1,8 +1,11 @@
 import type { CheckFact, PermissionPreset } from '../../shared/contracts'
 import type { CheckMethod, EvidenceBundle, FileStateMap, VerificationRequest, VerificationRun } from '../evidence/evidence'
+import { VERIFY_DIR, inputFingerprint } from '../evidence/evidence'
 import { describeMethod } from '../evidence/VerificationExecutor'
 import { extractRequirements, type RequiredItem } from './RequiredSpec'
 import { buildInventory, type EvidenceInventoryEntry, type ModelDecisionShape } from './ModelDecision'
+
+export { VERIFY_DIR }
 
 export interface WorkspaceHints {
   packageJson: boolean
@@ -20,10 +23,6 @@ export const EMPTY_HINTS: WorkspaceHints = {
   tsconfig: false
 }
 
-/** Workspace directory for sandbox verification artifacts (never dotted: the
- *  collector must track these files for validity stamping). */
-export const VERIFY_DIR = 'temporal-verify'
-
 export interface DecideInput {
   rootSpec: string
   bundle: EvidenceBundle
@@ -38,6 +37,9 @@ export interface DecideInput {
   modelDecision?: ModelDecisionShape
   /** Why the model's decision was absent or malformed (its reply still counts as incomplete). */
   decisionError?: string
+  /** Current sandbox request identities (kind → request); runs of an earlier
+   *  request are no longer current evidence. Absent = no sandbox requests. */
+  sandboxRequests?: ReadonlyMap<string, { rid: string; fingerprint: string }>
 }
 
 /** A verification the loop should run next (controller fills cwd/turn/permission). */
@@ -51,6 +53,8 @@ export interface SandboxScript {
   /** The exact command the model is told to run. */
   command: string
   content: string
+  /** The raw repository script command the wrapper runs (e.g. `npm test`). */
+  script?: string
 }
 
 export interface LoopDecision {
@@ -106,11 +110,20 @@ export class LoopEvaluator {
     const relevantByRun = new Map<string, boolean>()
     const changedSet = new Set(bundle.changedFiles)
     const failedTools = unresolvedToolFailures(bundle.toolFacts)
+    // Sandbox runs are only current evidence while the request that produced
+    // them is still the current request AND the workspace inputs still match
+    // the input fingerprint the check was requested against.
+    const sandboxContext = {
+      currentRids: input.sandboxRequests,
+      currentFingerprint: inputFingerprint(fileStates)
+    }
 
     // 1. Validity: a run is void if any target changed, disappeared, or its
-    //    content hash no longer matches (same size, same mtime edits).
+    //    content hash no longer matches (same size, same mtime edits). Sandbox
+    //    runs additionally require the current input fingerprint and request
+    //    identity to match the run's.
     for (const run of bundle.verification) {
-      const valid = runValid(run, fileStates, changedTurnByFile)
+      const valid = runValid(run, fileStates, changedTurnByFile, sandboxContext)
       validByRun.set(run.id, valid)
       relevantByRun.set(run.id, relevant(run, changedSet))
     }
@@ -217,7 +230,7 @@ export class LoopEvaluator {
       items,
       incomplete,
       knownIssues: dedupe(knownIssues),
-      nextPrompt: buildNextPrompt(rootSpec, incomplete, dedupe(knownIssues), inventory, modelDecision, sandboxScripts, rejectedCompletion === true),
+      nextPrompt: buildNextPrompt(rootSpec, incomplete, dedupe(knownIssues), inventory, modelDecision, rejectedCompletion === true),
       nextChecks,
       sandboxScripts,
       validRunIds: [...validByRun.entries()].filter(([, valid]) => valid).map(([id]) => id)
@@ -298,12 +311,18 @@ export class LoopEvaluator {
         if (conditionSatisfied(condition, validRuns, hints, permission)) continue
         const method = checkMethodFor(condition, hints, permission)
         if (!method) continue
-        const targets = method.kind === 'shell' ? changed : method.kind === 'content-equals' && isSandboxExitTarget(condition, method.target) ? [method.target, sandboxLogTarget(condition)] : [condition.target!]
+        const sandbox = method.kind === 'content-equals' && isSandboxExitTarget(condition, method.target)
+        // Sandbox checks verify the whole repository script result, so they
+        // are workspace-scoped (relevant while any task change exists); the
+        // controller resolves the symbolic exit/log targets to request-specific
+        // nonce artifact paths when executing the check.
+        const targets = method.kind === 'shell' ? changed : sandbox ? [method.target, sandboxLogTarget(condition)] : [condition.target!]
         requests.push({
           label: checkLabel(condition, item.id),
           method,
-          scope: method.kind === 'shell' ? 'workspace' : 'file',
-          targets
+          scope: sandbox || method.kind === 'shell' ? 'workspace' : 'file',
+          targets,
+          ...(sandbox ? { sandbox: { kind: condition.kind as 'tests' | 'typecheck' | 'build' } } : {})
         })
       }
     }
@@ -403,18 +422,19 @@ interface FactMatch {
 /** The latest valid fact that matches this condition's kind and target. Runs
  *  are evaluated in append (chronological) order; the last match wins. Script
  *  conditions match either a direct command-exit fact (full access) or the
- *  sandbox exit artifact (workspace-write). */
+ *  sandbox exit artifact run of the condition's stable check object
+ *  (workspace-write). */
 function latestFactFor(condition: RequiredItem['conditions'][number], method: CheckMethod, runs: VerificationRun[]): FactMatch | undefined {
   let best: FactMatch | undefined
   for (const run of runs) {
     for (const fact of run.facts) {
-      if (factMatches(fact, condition, method)) best = { fact, run }
+      if (factMatches(fact, run, condition, method)) best = { fact, run }
     }
   }
   return best
 }
 
-function factMatches(fact: CheckFact, condition: RequiredItem['conditions'][number], method: CheckMethod): boolean {
+function factMatches(fact: CheckFact, run: VerificationRun, condition: RequiredItem['conditions'][number], method: CheckMethod): boolean {
   switch (condition.kind) {
     case 'file': return fact.kind === 'file-exists' && fact.target === condition.target
     case 'content': return fact.kind === 'content-equals' && fact.target === condition.target
@@ -424,10 +444,11 @@ function factMatches(fact: CheckFact, condition: RequiredItem['conditions'][numb
     case 'typecheck':
     case 'build': {
       if (method.kind === 'shell') return fact.kind === 'command-exit' && fact.command === commandLineOf(method)
-      // Sandbox path: the fact is the product's own content check on the exit
-      // artifact; the same condition name keeps the check object stable so a
-      // later re-test clears an earlier failure of the same check.
-      return fact.kind === 'content-equals' && fact.target === sandboxExitTarget(condition.kind)
+      // Sandbox path: the fact is the product's own content check on the
+      // request-specific exit artifact. The check object (`sandbox:<kind>`)
+      // stays stable across request nonces so a later re-test clears an
+      // earlier failure of the same repository script.
+      return fact.kind === 'content-equals' && run.checkObject === `sandbox:${condition.kind}`
     }
   }
 }
@@ -438,7 +459,12 @@ function commandLineOf(method: CheckMethod): string {
   return joined.slice(0, 500)
 }
 
-function runValid(run: VerificationRun, fileStates: FileStateMap, changedTurnByFile: Map<string, number>): boolean {
+function runValid(
+  run: VerificationRun,
+  fileStates: FileStateMap,
+  changedTurnByFile: Map<string, number>,
+  sandboxContext?: { currentRids?: ReadonlyMap<string, { rid: string; fingerprint: string }>; currentFingerprint?: string }
+): boolean {
   for (const target of run.targets) {
     const current = fileStates.get(target)
     const atRun = run.stamps.get(target)
@@ -454,7 +480,27 @@ function runValid(run: VerificationRun, fileStates: FileStateMap, changedTurnByF
     }
     if ((changedTurnByFile.get(target) ?? 0) > run.turn) return false
   }
+  // Sandbox runs additionally bind the run to the request identity and the
+  // workspace input snapshot the check was requested against. A leftover
+  // artifact from a previous request, or inputs that changed after the request,
+  // make the run something other than the current check's evidence. A run that
+  // claims the sandbox object but carries no request identity or fingerprint is
+  // malformed and can never be current evidence.
+  if (run.requestId || run.checkObject?.startsWith('sandbox:')) {
+    if (run.requestId === undefined || run.inputFingerprint === undefined) return false
+    const kind = sandboxKindOf(run)
+    const currentRid = kind && sandboxContext?.currentRids ? sandboxContext.currentRids.get(kind)?.rid : undefined
+    if (kind && sandboxContext?.currentRids && currentRid !== run.requestId) return false
+    if (sandboxContext?.currentFingerprint !== undefined && run.inputFingerprint !== sandboxContext.currentFingerprint) return false
+  }
   return true
+}
+
+/** The sandbox kind a run belongs to, from its stable check object. */
+export function sandboxKindOf(run: VerificationRun): 'tests' | 'typecheck' | 'build' | undefined {
+  if (!run.checkObject || !run.checkObject.startsWith('sandbox:')) return undefined
+  const kind = run.checkObject.slice('sandbox:'.length)
+  return kind === 'tests' || kind === 'typecheck' || kind === 'build' ? kind : undefined
 }
 
 function relevant(run: VerificationRun, changedSet: Set<string>): boolean {
@@ -463,18 +509,17 @@ function relevant(run: VerificationRun, changedSet: Set<string>): boolean {
 }
 
 /** An old failed check is only cleared by a valid passing re-test of the same
- *  check object (same method, same command, same targets) that ran AFTER it —
- *  never by an unrelated later success. Order is the chronological append
- *  order of the run array. */
+ *  check object (same method, same command, same targets — or the same
+ *  `checkObject` for sandbox re-runs) that ran AFTER it — never by an
+ *  unrelated later success. Order is the chronological append order of the run
+ *  array. */
 function clearedByRetest(failedRun: VerificationRun, allRuns: VerificationRun[], validByRun: Map<string, boolean>): boolean {
   const failedIndex = allRuns.indexOf(failedRun)
   return allRuns.some((other, index) =>
     index > failedIndex
     && other.outcome === 'passed'
     && validByRun.get(other.id)
-    && other.method === failedRun.method
-    && other.command === failedRun.command
-    && sameTargets(other.targets, failedRun.targets)
+    && sameCheckObject(other, failedRun)
   )
 }
 
@@ -484,10 +529,13 @@ function supersededByLaterRun(run: VerificationRun, allRuns: VerificationRun[]):
   const index = allRuns.indexOf(run)
   return allRuns.some((other, otherIndex) =>
     otherIndex > index
-    && other.method === run.method
-    && other.command === run.command
-    && sameTargets(other.targets, run.targets)
+    && sameCheckObject(other, run)
   )
+}
+
+function sameCheckObject(a: VerificationRun, b: VerificationRun): boolean {
+  if (a.checkObject || b.checkObject) return a.checkObject === b.checkObject
+  return a.method === b.method && a.command === b.command && sameTargets(a.targets, b.targets)
 }
 
 function sameTargets(a: string[], b: string[]): boolean {
@@ -593,6 +641,7 @@ function sandboxScriptsFor(requests: CheckRequest[], hints: WorkspaceHints, perm
     scripts.set(kind, {
       name: `${kind}.cmd`,
       command: `cmd /c ${VERIFY_DIR}\\${kind}.cmd`,
+      script,
       content: [
         '@echo off',
         'cd /d "%~dp0.."',
@@ -614,7 +663,6 @@ function buildNextPrompt(
   knownIssues: string[],
   inventory: EvidenceInventoryEntry[],
   modelDecision: ModelDecisionShape | undefined,
-  sandboxScripts: SandboxScript[],
   rejectedCompletion: boolean
 ): string {
   const lines: string[] = []
@@ -638,10 +686,6 @@ function buildNextPrompt(
   }
   if (modelDecision?.nextAction?.trim()) {
     lines.push(`Your own stated next action: ${truncate(modelDecision.nextAction, 400)}`)
-  }
-  if (sandboxScripts.length > 0) {
-    lines.push('Run these verification scripts exactly as written so the product can verify the results:')
-    for (const script of sandboxScripts) lines.push(`- ${script.command}`)
   }
   lines.push(`Original spec: ${truncate(rootSpec, 2000)}`)
   lines.push('Continue the work. End your reply with the temporal-decision block as instructed. When you are genuinely blocked and need user input, set decision to "blocked" in that block.')

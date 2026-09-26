@@ -155,7 +155,9 @@ const noEvidence = builder.build({
   finalResponse: 'Everything is done and all tests passed.',
   evidence: { changedFiles: ['a.ts'], newFiles: [], verification: [], outcome: 'completed' }
 })
-check('no_evidence_no_passed_verification', noEvidence.verification.length === 0)
+// A model claim can never create verification; with none run, the Verification
+// section states so explicitly instead of silently hiding it.
+check('no_evidence_no_passed_verification', noEvidence.verification.length === 1 && noEvidence.verification[0].includes('本轮未运行验证'))
 const withEvidence = builder.build({
   finalResponse: 'Done.',
   evidence: { changedFiles: ['a.ts'], newFiles: ['a.ts'], verification: [{ label: 'pnpm test', detail: 'ok', outcome: 'passed', provenance: 'tool' }], outcome: 'completed' }
@@ -418,6 +420,64 @@ check('evidence_persisted', engineSession.listEvidence(loopRound.id).some((recor
   })
   check('result_marks_historical_passes', doc.verification.some((line) => line.includes('stale') && line.includes('历史')) && doc.verification.some((line) => line.includes('now') && !line.includes('历史')))
   check('result_decision_persisted_on_failure', doc.decision?.decision === 'continue' && doc.decision.knownIssues.includes('k'))
+}
+
+// ---------------------------------------------------------------------------
+// TODO 7 §3 (B): the Result summarizes the WHOLE round, not the last request.
+// Entered from RoundEngine's whole-round closing (vibe finalize) above.
+// ---------------------------------------------------------------------------
+{
+  // Vibe with two requests: the summary covers BOTH, never just the last one,
+  // and with no product verification it says so instead of inventing passes.
+  const vibeDoc = engineSession.getResult(rounds[1].id)
+  check('b_summary_covers_both_vibe_requests',
+    vibeDoc?.summary.includes('请求#1') && vibeDoc?.summary.includes('请求#2')
+    && vibeDoc?.summary.includes('vibe spec one') && vibeDoc?.summary.includes('vibe spec two')
+    && vibeDoc?.summary.includes('output 3') && vibeDoc?.summary.includes('output 4')
+    && !vibeDoc?.summary.includes('temporal-decision'))
+  check('b_vibe_completion_is_request_ended_not_acceptance',
+    vibeDoc?.summary.includes('不代表功能验收通过'))
+  check('b_no_verification_stated_explicitly',
+    vibeDoc?.verification.some((line) => line.includes('本轮未运行验证')))
+  check('b_unconfirmed_when_no_verification',
+    vibeDoc?.remaining.some((line) => line.includes('需求完成情况未独立确认')))
+
+  // Plan: two versions → final plan + revisions, and the plan never claims
+  // the implementation is done.
+  const planDoc = engineSession.getResult(rounds[0].id)
+  check('b_plan_final_version_and_revisions',
+    planDoc?.summary.includes('最终计划为版本 2') && planDoc?.summary.includes('逐步修订') && planDoc?.summary.includes('output 2'))
+  check('b_plan_does_not_claim_implementation',
+    planDoc?.summary.includes('只产出计划'))
+
+  // Loop: the terminal outcome + evidence coverage appear in the summary.
+  check('b_loop_summary_terminal', loopResult?.summary.includes('Loop 轮次终态') && loopResult?.summary.includes('有效通过验证见 Verification') && /执行成果记录: output \d/.test(loopResult?.summary ?? ''))
+
+  // Reopen: a fresh ProductStore on the same database sees the SAME four-part
+  // Result (persisted whole-round summary), keeping historical/current and the
+  // evidence source intact after restart.
+  const reopenedStore = new ProductStore(join(engineRoot, 'engine.sqlite'))
+  const reopenedVibe = reopenedStore.getResult(rounds[1].id)
+  check('b_reopen_result_consistent',
+    Boolean(reopenedVibe)
+    && reopenedVibe.summary.includes('请求#1') && reopenedVibe.summary.includes('请求#2')
+    && reopenedVibe.verification.some((line) => line.includes('本轮未运行验证'))
+    && reopenedVibe.remaining.some((line) => line.includes('需求完成情况未独立确认'))
+    && Array.isArray(reopenedVibe.changes) && Array.isArray(reopenedVibe.verification) && Array.isArray(reopenedVibe.remaining))
+  const reopenedLoop = reopenedStore.getResult(loopRound.id)
+  check('b_reopen_loop_terminal_preserved', reopenedLoop?.loopTerminal?.status === 'completed' && Boolean(reopenedLoop.summary.includes('有效通过验证见 Verification')))
+  reopenedStore.close()
+
+  // Summarization must never block saving: a pathological output value throws
+  // inside the (deterministic) summarizer and the Result still saves with a
+  // readable per-request fallback.
+  const exceptionDoc = builder.build({
+    finalResponse: 'r', outcome: 'completed',
+    evidence: { changedFiles: ['a.ts'], turnChangedFiles: [], newFiles: ['a.ts'], deletedFiles: [], preexistingChanges: [], toolFacts: [], verification: [], outcome: 'completed' },
+    round: { mode: 'plan', turns: [{ spec: 's', outcome: 'completed', output: 123 }] }
+  })
+  check('b_result_survives_summary_exception',
+    exceptionDoc.summary.includes('实际输出见请求记录') && exceptionDoc.summary.length > 0)
 }
 engineSession.close()
 

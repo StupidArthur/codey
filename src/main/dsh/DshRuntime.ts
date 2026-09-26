@@ -9,6 +9,7 @@ import type { ModelSettings, PermissionPreset, RunnerEvent } from '../../shared/
 import type { ToolCallFact } from '../evidence/evidence'
 import { resolveInstalledDshBin } from './SessionDiscovery'
 import { TurnProjector, type ProjectedEvent } from './projection'
+import { windowsConsolePreloadSource } from './WindowsRuntimeHost'
 
 /** Thrown when a prompt turn hits its deadline: the turn was cancelled via
  *  the public `session/cancel` notification (or abandoned after a grace
@@ -80,6 +81,14 @@ export class DshRuntime {
     await writeFile(patchPath, providerPatch({ provider, model, baseUrl: baseUrl ?? '', official }))
 
     const env: NodeJS.ProcessEnv = { ...process.env }
+    if (process.platform === 'win32' && process.versions.electron) {
+      const preload = join(this.patchDir, 'console-preload.cjs')
+      await writeFile(preload, windowsConsolePreloadSource(require.resolve('koffi')))
+      // Runner processes also use the GUI Electron executable. A scoped Node
+      // preload reaches those descendants; ordinary project node.exe processes
+      // return without loading native bindings or changing their console.
+      env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --require ${JSON.stringify(preload.replace(/\\/g, '/'))}`.trim()
+    }
     if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1'
     if (this.options.credential) {
       // deepseek-official reads DEEPSEEK_API_KEY; any other provider is mounted

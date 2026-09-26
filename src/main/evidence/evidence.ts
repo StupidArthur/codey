@@ -1,6 +1,12 @@
+import { createHash } from 'node:crypto'
 import type { CheckFact, ExecutionOutcome, PermissionPreset } from '../../shared/contracts'
 
 export type { CheckFact }
+
+/** Workspace directory for sandbox verification artifacts (never dotted: the
+ *  collector must track these files for validity stamping while the loop
+ *  excludes them from task-change/progress accounting). */
+export const VERIFY_DIR = 'temporal-verify'
 /**
  * Structured verification facts. Only the product's own verification executor
  * may produce `passed`/`failed` verification verdicts; DSH tool telemetry
@@ -68,6 +74,26 @@ export interface VerificationRun {
   outcome: 'passed' | 'failed' | 'denied' | 'observed'
   /** Present when the executor refused to run the check (permission boundary). */
   denial?: string
+  /**
+   * Sandbox checks only: the nonce identifying the exact request that produced
+   * this run. A leftover artifact from a different request (a previous Round's
+   * fixed-name `.exit` file) can never satisfy the current request because the
+   * check reads the request-specific artifact path.
+   */
+  requestId?: string
+  /**
+   * Sandbox checks only: the input fingerprint of the workspace inputs the
+   * check was requested against. The run is only a CURRENT pass while the
+   * present inputs still produce the same fingerprint.
+   */
+  inputFingerprint?: string
+  /**
+   * Stable identity of the check object across re-runs. Sandbox runs carry
+   * `sandbox:<kind>`; a re-check (any request nonce) supersedes the previous
+   * run of the same object, so old failures/passes never pollute the current
+   * conclusion. Falls back to method+command+targets when absent.
+   */
+  checkObject?: string
   at: string
 }
 
@@ -80,6 +106,47 @@ export interface VerificationRequest {
   turn: number
   timeoutMs?: number
   permission?: VerificationPermission
+  /** The repository-script kind this request verifies through a sandbox wrapper. */
+  sandbox?: { kind: 'tests' | 'typecheck' | 'build' }
+  requestId?: string
+  inputFingerprint?: string
+  checkObject?: string
+}
+
+/**
+ * Input fingerprint of the workspace the check corresponds to. Content-first:
+ * entries carry the content hash (mtime-only touches with identical content do
+ * not change the fingerprint); files without a hash fall back to size+mtime.
+ * Additions and deletions change the fingerprint because the path set is part
+ * of it. Product verification artifacts (`temporal-verify`), dependency
+ * directories (`node_modules`) and explicit build outputs (`dist`/`out`/
+ * `build`/`release`) are excluded: they are not project inputs, and a check's
+ * own logs/exit files must never invalidate their own check. Git metadata is
+ * already absent from the snapshot (dot-directories are skipped). This is a
+ * conservative association with the current snapshot's project input files; it
+ * does not promise to cover every possible external dependency.
+ */
+export function inputFingerprint(fileStates: FileStateMap): string {
+  const parts: string[] = []
+  for (const [file, state] of fileStates) {
+    if (isExcludedInput(file)) continue
+    if (!state.exists) {
+      parts.push(`${file}\u0000absent`)
+      continue
+    }
+    parts.push(`${file}\u0000${state.hash ?? `${state.size}:${state.mtimeMs}`}`)
+  }
+  parts.sort()
+  return createHash('sha1').update(parts.join('\n'), 'utf8').digest('hex')
+}
+
+const EXCLUDED_INPUT_PREFIXES = ['temporal-verify', 'node_modules', 'dist', 'out', 'build', 'release', '.git']
+
+function isExcludedInput(file: string): boolean {
+  for (const prefix of EXCLUDED_INPUT_PREFIXES) {
+    if (file === prefix || file.startsWith(`${prefix}/`)) return true
+  }
+  return false
 }
 
 export type VerificationExecutorFn = (request: VerificationRequest) => Promise<VerificationRun>

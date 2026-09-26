@@ -97,6 +97,12 @@ export interface EvidenceSummary {
   valid?: boolean
   turn?: number
   toolCallId?: string
+  /** Sandbox checks only: the nonce of the request that produced this run. */
+  requestId?: string
+  /** Sandbox checks only: the input fingerprint the run was requested against. */
+  inputFingerprint?: string
+  /** Stable check-object identity (`sandbox:<kind>`) across re-runs. */
+  checkObject?: string
 }
 
 export interface LoopTerminalSummary {

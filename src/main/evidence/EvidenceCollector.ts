@@ -7,6 +7,7 @@ import type { EvidenceSummary, ExecutionOutcome, RunnerEvent } from '../../share
 import type {
   CollectResult, EvidenceBundle, FileState, FileStateMap, ToolCallFact, VerificationRun, WorkspaceSnapshot
 } from './evidence'
+import { VERIFY_DIR } from './evidence'
 
 const run = promisify(execFile)
 const MAX_DIFF = 4_000
@@ -83,6 +84,16 @@ export class EvidenceCollector {
     const deletedFiles = deleted.filter((file) =>
       isGit ? (dirty.get(file) ?? '').includes('D') || !dirty.has(file) : true
     )
+    // The product's verification artifacts (`temporal-verify`, including the
+    // model-run wrappers and the exit/log files they produce) are product
+    // material, not user task work: they must never count as task changes,
+    // progress, or Result artifacts, and their own writes must never invalidate
+    // a check's input fingerprint.
+    const userWork = (file: string): boolean => !file.startsWith(`${VERIFY_DIR}/`)
+    const changedFilesFiltered = changedFiles.filter(userWork)
+    const turnChangedFilesFiltered = turnChangedFiles.filter(userWork)
+    const newFilesFiltered = newFiles.filter(userWork)
+    const deletedFilesFiltered = deletedFiles.filter(userWork)
 
     let gitDiffSummary: string | undefined
     if (isGit) {
@@ -91,10 +102,10 @@ export class EvidenceCollector {
     }
 
     const bundle: EvidenceBundle = {
-      changedFiles: dedupe(changedFiles).slice(0, MAX_FILES),
-      turnChangedFiles: dedupe(turnChangedFiles).slice(0, MAX_FILES),
-      newFiles: dedupe(newFiles).slice(0, MAX_FILES),
-      deletedFiles: dedupe(deletedFiles).slice(0, MAX_FILES),
+      changedFiles: dedupe(changedFilesFiltered).slice(0, MAX_FILES),
+      turnChangedFiles: dedupe(turnChangedFilesFiltered).slice(0, MAX_FILES),
+      newFiles: dedupe(newFilesFiltered).slice(0, MAX_FILES),
+      deletedFiles: dedupe(deletedFilesFiltered).slice(0, MAX_FILES),
       preexistingChanges: [...startSnapshot.preexisting].slice(0, MAX_FILES),
       ...(isGit ? { fileStatus: new Map(dirty) } : {}),
       ...(gitDiffSummary ? { gitDiffSummary } : {}),
@@ -141,7 +152,10 @@ export class EvidenceCollector {
         provenance: 'tool', observedAt: run.at, command: run.command, exitCode: run.exitCode,
         targets: run.targets, facts: run.facts,
         ...(run.denial ? { denial: run.denial } : {}),
-        turn: run.turn
+        turn: run.turn,
+        ...(run.requestId ? { requestId: run.requestId } : {}),
+        ...(run.inputFingerprint ? { inputFingerprint: run.inputFingerprint } : {}),
+        ...(run.checkObject ? { checkObject: run.checkObject } : {})
       })
     }
     return records
@@ -160,20 +174,26 @@ function describeChange(bundle: EvidenceBundle, file: string): string {
 
 function runDetail(run: VerificationRun): string {
   if (run.outcome === 'denied') return `denied — ${run.denial ?? 'executor refused the check'}`
+  // Sandbox checks: the product reads artifacts the model produced inside DSH's
+  // own confined execution. The product factually verified the result artifact
+  // (and the input snapshot it was requested against) — it did not directly
+  // capture a child-process exit. The source is stated as such, never as a
+  // directly-observed process exit.
+  const source = run.requestId ? 'DSH 沙盒检查报告；产品核实结果产物及输入快照 — ' : ''
   if (run.method === 'builtin') {
     const fact = run.facts[0]
-    if (fact?.kind === 'file-exists') return fact.matched ? 'file exists' : fact.isFile ? 'missing' : 'path exists but is not a regular file'
+    if (fact?.kind === 'file-exists') return `${source}${fact.matched ? 'file exists' : fact.isFile ? 'missing' : 'path exists but is not a regular file'}`
     if (fact?.kind === 'content-equals') {
       return fact.matched
-        ? `content match (sha1 ${fact.actualHash})`
-        : `content mismatch (expected sha1 ${fact.expectedHash}, actual ${fact.actualHash ?? 'n/a'})`
+        ? `${source}content match (sha1 ${fact.actualHash})`
+        : `${source}content mismatch (expected sha1 ${fact.expectedHash}, actual ${fact.actualHash ?? 'n/a'})`
     }
     if (fact?.kind === 'field-equals') {
       return fact.matched
-        ? `field '${fact.key}' = '${fact.expected}'`
-        : `field '${fact.key}' is ${fact.actual === null ? 'missing' : `'${fact.actual}'`}, expected '${fact.expected}'`
+        ? `${source}field '${fact.key}' = '${fact.expected}'`
+        : `${source}field '${fact.key}' is ${fact.actual === null ? 'missing' : `'${fact.actual}'`}, expected '${fact.expected}'`
     }
-    return run.outputTail || 'builtin check'
+    return `${source}${run.outputTail || 'builtin check'}`
   }
   const tail = run.outputTail ? ` — ${run.outputTail}` : ''
   return `exit ${run.exitCode === null ? 'n/a' : run.exitCode}${tail}`

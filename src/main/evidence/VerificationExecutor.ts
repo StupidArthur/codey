@@ -67,6 +67,9 @@ export class VerificationExecutor {
       stamps: new Map(),
       outcome: 'denied',
       denial: reason,
+      ...(request.requestId ? { requestId: request.requestId } : {}),
+      ...(request.inputFingerprint ? { inputFingerprint: request.inputFingerprint } : {}),
+      ...(request.checkObject ? { checkObject: request.checkObject } : {}),
       at
     }
   }
@@ -200,6 +203,9 @@ export class VerificationExecutor {
       facts,
       stamps,
       outcome,
+      ...(request.requestId ? { requestId: request.requestId } : {}),
+      ...(request.inputFingerprint ? { inputFingerprint: request.inputFingerprint } : {}),
+      ...(request.checkObject ? { checkObject: request.checkObject } : {}),
       ...(denial ? { denial } : {}),
       at
     }

@@ -114,7 +114,8 @@ export class RoundEngine {
           mode: 'loop',
           turns: [{
             spec: input.spec,
-            outcome: result.terminal.status === 'completed' ? 'completed' : result.terminal.status === 'blocked' ? 'blocked' : 'failed'
+            outcome: result.terminal.status === 'completed' ? 'completed' : result.terminal.status === 'blocked' ? 'blocked' : 'failed',
+            output: result.finalResponse
           }]
         }
       })
@@ -143,7 +144,7 @@ export class RoundEngine {
         outcome: last?.executionOutcome ?? 'completed',
         round: {
           mode: 'vibe',
-          turns: entries.map((entry) => ({ spec: entry.specMarkdown, outcome: entry.executionOutcome }))
+          turns: entries.map((entry) => ({ spec: entry.specMarkdown, outcome: entry.executionOutcome, output: entry.assistantOutput }))
         }
       })
       store.saveResult(round.id, document)
@@ -158,7 +159,7 @@ export class RoundEngine {
           outcome: 'completed',
           round: {
             mode: 'plan',
-            turns: versions.map((version) => ({ spec: version.submittedSpec, outcome: 'completed' as const }))
+            turns: versions.map((version) => ({ spec: version.submittedSpec, outcome: 'completed' as const, output: version.planMarkdown }))
           }
         })
         store.saveResult(round.id, document)
@@ -227,10 +228,15 @@ function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
         method: record.command?.startsWith('builtin:') ? 'builtin' : 'shell',
         command: record.command ?? record.label,
         exitCode: record.exitCode ?? null, signal: null, outputTail: record.detail,
-        scope: record.targets && record.targets.length > 0 ? 'file' : 'workspace',
+        // Sandbox runs are workspace-scoped regardless of their (nonce)
+        // artifact targets; reconstructed here from the persisted identity.
+        scope: record.checkObject ? 'workspace' : record.targets && record.targets.length > 0 ? 'file' : 'workspace',
         targets: record.targets ?? [], facts: record.facts ?? [], stamps: new Map(),
         outcome: record.denial ? 'denied' : record.outcome === 'observed' ? 'observed' : record.outcome,
         ...(record.denial ? { denial: record.denial } : {}),
+        ...(record.requestId ? { requestId: record.requestId } : {}),
+        ...(record.inputFingerprint ? { inputFingerprint: record.inputFingerprint } : {}),
+        ...(record.checkObject ? { checkObject: record.checkObject } : {}),
         at: record.observedAt
       })
     }
