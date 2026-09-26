@@ -114,7 +114,7 @@ export class WindowController {
       this.workspacePath = workspacePath
       this.session = nextSession
       this.logger = new SessionLogger(nextSession.id)
-      this.log('session.open', { title: nextSession.title, workspacePath, dshSessionId: nextSession.dshSessionId, permission: nextSession.permission })
+      this.log('session.open', { title: nextSession.title, workspacePath, dshSessionId: nextSession.dshSessionId, permission: nextSession.permission, logFile: this.logger.filePath })
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
       this.error = undefined
