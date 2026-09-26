@@ -31,6 +31,7 @@ export class WindowController {
   private logger: SessionLogger | null = null
   private activeRunId: string | undefined
   private activeRunStartedAt: number | undefined
+  private runnerSnapshotTimer: ReturnType<typeof setTimeout> | undefined
   private readonly discovery = new SessionDiscovery()
   private readonly evidence = new EvidenceCollector()
   private readonly resultBuilder = new ResultBuilder()
@@ -65,6 +66,7 @@ export class WindowController {
         this.pendingEvidenceEvents = []
         return events
       },
+      onDiagnostic: (type, payload) => this.log(type, payload),
       onRoundChanged: async () => { await this.emitSnapshot() }
     })
   }
@@ -118,6 +120,10 @@ export class WindowController {
       this.session = nextSession
       this.logger = new SessionLogger(nextSession.id)
       this.log('session.open', { title: nextSession.title, workspacePath, dshSessionId: nextSession.dshSessionId, permission: nextSession.permission, logFile: this.logger.filePath })
+      if (this.runnerSnapshotTimer) {
+        clearTimeout(this.runnerSnapshotTimer)
+        this.runnerSnapshotTimer = undefined
+      }
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
       this.error = undefined
@@ -296,6 +302,10 @@ export class WindowController {
   }
 
   private async releaseCurrent(): Promise<void> {
+    if (this.runnerSnapshotTimer) {
+      clearTimeout(this.runnerSnapshotTimer)
+      this.runnerSnapshotTimer = undefined
+    }
     await this.closeRuntime()
     await this.logger?.flush()
     this.logger = null
@@ -325,7 +335,16 @@ export class WindowController {
     if (this.runnerEvents.length > 200) this.runnerEvents.shift()
     this.pendingEvidenceEvents.push(event)
     if (this.pendingEvidenceEvents.length > 1000) this.pendingEvidenceEvents.shift()
-    void this.emitSnapshot()
+    this.scheduleRunnerSnapshot()
+  }
+
+  private scheduleRunnerSnapshot(): void {
+    if (this.runnerSnapshotTimer) return
+    this.runnerSnapshotTimer = setTimeout(() => {
+      this.runnerSnapshotTimer = undefined
+      void this.emitSnapshot()
+    }, 100)
+    this.runnerSnapshotTimer.unref?.()
   }
 
   private log(type: string, payload?: unknown): void {
@@ -336,7 +355,18 @@ export class WindowController {
   }
 
   private async emitSnapshot(): Promise<WorkspaceSnapshot> {
+    const startedAt = Date.now()
     const snapshot = await this.getSnapshot()
+    const durationMs = Date.now() - startedAt
+    if (this.activeRunId) {
+      this.log('snapshot.build', {
+        durationMs,
+        rounds: snapshot.rounds.length,
+        runnerEvents: snapshot.runnerEvents.length,
+        vibeEntries: snapshot.rounds.reduce((total, round) => total + round.vibeEntries.length, 0),
+        evidence: snapshot.rounds.reduce((total, round) => total + round.evidence.length, 0)
+      })
+    }
     if (!this.window.isDestroyed()) this.window.webContents.send(IPC.snapshotChanged, snapshot)
     return snapshot
   }
