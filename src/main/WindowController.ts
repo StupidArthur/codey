@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
 import type { BrowserWindow } from 'electron'
 import type {
@@ -28,6 +29,8 @@ export class WindowController {
   private pendingEvidenceEvents: RunnerEvent[] = []
   private error: string | undefined
   private logger: SessionLogger | null = null
+  private activeRunId: string | undefined
+  private activeRunStartedAt: number | undefined
   private readonly discovery = new SessionDiscovery()
   private readonly evidence = new EvidenceCollector()
   private readonly resultBuilder = new ResultBuilder()
@@ -189,6 +192,8 @@ export class WindowController {
 
     const submittedRevision = this.store.getDraftWithRevision(session.id).revision
     const submitStartedAt = Date.now()
+    this.activeRunId = randomUUID()
+    this.activeRunStartedAt = submitStartedAt
     this.log('submit.start', { mode, spec, provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl, permission: session.permission, dshSessionId: session.dshSessionId })
     this.cancelRequested = false
     this.running = true
@@ -213,6 +218,8 @@ export class WindowController {
       this.log('submit.finalize', { mode, durationMs: Date.now() - submitStartedAt, cancelRequested: this.cancelRequested })
       this.running = false
       this.cancelRequested = false
+      this.activeRunId = undefined
+      this.activeRunStartedAt = undefined
       // Keep the last runner events long enough for the close animation and
       // post-run inspection. The next submit clears them before it starts.
       this.pendingEvidenceEvents = []
@@ -322,7 +329,10 @@ export class WindowController {
   }
 
   private log(type: string, payload?: unknown): void {
-    this.logger?.write(type, payload)
+    this.logger?.write(type, payload, {
+      ...(this.activeRunId ? { runId: this.activeRunId } : {}),
+      ...(this.activeRunStartedAt !== undefined ? { runElapsedMs: Date.now() - this.activeRunStartedAt } : {})
+    })
   }
 
   private async emitSnapshot(): Promise<WorkspaceSnapshot> {
