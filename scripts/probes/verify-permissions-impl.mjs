@@ -190,7 +190,9 @@ await writeFile(join(outsideRoot, OUTSIDE_MARKER), 'untouched')
   // 8. Full-access (explicit user opt-in): timeout terminates the whole
   //    process tree. The outer batch spawns a nested cmd that sleeps ~6s and
   //    then writes the marker itself — if the tree is not fully terminated,
-  //    the orphaned grandchild completes the write.
+  //    the orphaned grandchild completes the write. A failed reclamation must
+  //    never be swallowed: the run must then record the incomplete
+  //    termination in its output tail.
   const ws = await mkdtemp(join(tmpdir(), 'temporal-perm-timeout-'))
   const marker = join(ws, 'late-marker.txt')
   await writeFile(join(ws, 'run-slow.cmd'), '@echo off\r\ncmd /c slowchild.cmd\r\n')
@@ -202,8 +204,10 @@ await writeFile(join(outsideRoot, OUTSIDE_MARKER), 'untouched')
     permission: { preset: 'danger-full-access', workspacePath: ws }
   })
   check('timeout_recorded', run.signal === 'timeout')
-  await wait(8000)
-  check('timeout_tree_killed_no_late_write', !existsSync(marker))
+  await wait(9000)
+  const lateWrite = existsSync(marker)
+  check('timeout_tree_killed_no_late_write', !lateWrite)
+  check('timeout_reclamation_reported_honestly', !lateWrite || run.outputTail.includes('termination incomplete'))
   check('timeout_not_passed', run.outcome !== 'passed')
 }
 

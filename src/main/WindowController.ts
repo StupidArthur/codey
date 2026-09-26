@@ -82,20 +82,30 @@ export class WindowController {
 
     if (this.session?.id === nextSession.id) return this.getSnapshot()
 
-    this.store.reconcileInterruptedRounds(nextSession.id)
+    // Ownership first, recovery second: the lease must be held before any
+    // dangling execution of that session is reconciled, so a rejected opener
+    // can never mutate another window's live round. If anything fails after
+    // the acquire, the new lock is released again and the previous window's
+    // ownership is untouched.
     const nextLease = this.store.acquireSessionLease(nextSession.id, () => {
       this.error = 'Session 的独占锁已丢失，请重新打开。'
       void this.closeRuntime()
       void this.emitSnapshot()
     })
-    await this.releaseCurrent()
-    this.lease = nextLease
-    this.workspacePath = workspacePath
-    this.session = nextSession
-    this.runnerEvents = []
-    this.pendingEvidenceEvents = []
-    this.error = undefined
-    return this.emitSnapshot()
+    try {
+      this.store.reconcileInterruptedRounds(nextSession.id)
+      await this.releaseCurrent()
+      this.lease = nextLease
+      this.workspacePath = workspacePath
+      this.session = nextSession
+      this.runnerEvents = []
+      this.pendingEvidenceEvents = []
+      this.error = undefined
+      return await this.emitSnapshot()
+    } catch (error) {
+      try { nextLease.release() } catch { /* best effort */ }
+      throw error
+    }
   }
 
   async getSnapshot(): Promise<WorkspaceSnapshot> {
@@ -121,6 +131,7 @@ export class WindowController {
   }
 
   async saveDraft(draft: string, mode: RoundMode): Promise<void> {
+    this.assertOwnership()
     const session = this.requireSession()
     this.store.saveDraft(session.id, draft, mode)
     await this.emitSnapshot()
@@ -142,6 +153,7 @@ export class WindowController {
   }
 
   async setPermission(preset: PermissionPreset): Promise<void> {
+    this.assertOwnership()
     const session = this.requireSession()
     if (this.running) throw new Error('运行期间不能修改权限。')
     this.store.setPermission(session.id, preset)
@@ -151,6 +163,7 @@ export class WindowController {
   }
 
   async submit(spec: string, mode: RoundMode): Promise<void> {
+    this.assertOwnership()
     const session = this.requireSession()
     if (this.running) throw new Error('当前已有执行任务。')
     if (!spec.trim()) throw new Error('Spec 不能为空。')
@@ -180,6 +193,7 @@ export class WindowController {
   }
 
   async endRound(): Promise<void> {
+    this.assertOwnership()
     const session = this.requireSession()
     if (this.running) throw new Error('运行期间不能结束当前轮次。')
     await this.engine.endCurrent(session)
@@ -195,7 +209,15 @@ export class WindowController {
     return this.session
   }
 
+  /** Protected-state guard: a window that lost its lease may not mutate the
+   *  session (drafts, rounds, permission) or restart its runtime. */
+  private assertOwnership(): void {
+    if (!this.lease) throw new Error('请先选择 Workspace 和 Session。')
+    this.lease.assertHeld()
+  }
+
   private async ensureRuntime(): Promise<DshRuntime> {
+    this.assertOwnership()
     if (this.runtime) return this.runtime
     const session = this.requireSession()
     const settings = await this.getModelSettings()

@@ -145,8 +145,16 @@ export class VerificationExecutor {
     }
 
     // Stamp the target (with content hash) whether the check passed or failed,
-    // so a later modification can invalidate the recorded fact.
+    // so a later modification can invalidate the recorded fact. Additional
+    // request targets (e.g. a sandbox check's log next to its exit artifact)
+    // are anchored too: a missing or later-modified artifact invalidates the
+    // run instead of letting an unverified pass stand.
     stamps.set(target, await stampFile(contained))
+    for (const extra of request.targets) {
+      if (extra === target || stamps.has(extra)) continue
+      const extraPath = await resolveInsideWorkspace(request.permission!.workspacePath, extra)
+      if (extraPath) stamps.set(extra, await stampFile(extraPath))
+    }
     const outcome = fact.matched ? 'passed' : 'failed'
     return this.finish(request, at, 'builtin', describeMethod(method), outcome, [fact], stamps, null, null, outputTail)
   }
@@ -344,8 +352,9 @@ function runProcess(command: string, args: string[], cwd: string, timeoutMs: num
       if (settled) return
       settled = true
       clearTimeout(timer)
-      void killProcessTree(child).then(() => {
-        resolvePromise({ exitCode: null, signal: 'timeout', outputTail: output.trim().slice(-MAX_OUTPUT) })
+      void killProcessTree(child).then((note) => {
+        const tail = note ? `${output.trim()}\n${note}` : output
+        resolvePromise({ exitCode: null, signal: 'timeout', outputTail: tail.trim().slice(-MAX_OUTPUT) })
       })
     }, timeoutMs)
     child.on('error', (error) => {
@@ -365,18 +374,108 @@ function runProcess(command: string, args: string[], cwd: string, timeoutMs: num
 
 /** Terminate the whole verification process tree; a bare kill could leave
  *  grandchildren running (and writing) after the timeout. taskkill /T must run
- *  BEFORE the direct kill: once the parent is gone its tree is unresolvable. */
-async function killProcessTree(child: NonNullable<ReturnType<typeof spawn>>): Promise<void> {
+ *  BEFORE the direct kill: once the parent is gone its tree is unresolvable.
+ *
+ *  Reclamation is verified, not assumed: after the taskkill pass a fresh
+ *  process-edge snapshot is walked from the original PID (orphaned children
+ *  keep their PPID on Windows), survivors are killed individually, and any
+ *  process that still survives is reported in the returned note so the run
+ *  records the truth instead of claiming a termination that did not happen. */
+async function killProcessTree(child: NonNullable<ReturnType<typeof spawn>>): Promise<string | undefined> {
   const pid = child.pid
+  let note: string | undefined
   if (pid && process.platform === 'win32') {
-    await new Promise<void>((resolvePromise) => {
-      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-      killer.on('error', () => resolvePromise())
-      killer.on('close', () => resolvePromise())
-      setTimeout(resolvePromise, 5_000)
-    })
+    await taskkillPid(pid, true)
+    const edges = await listProcessEdges()
+    if (edges) {
+      const survivors = walkProcessTree(edges, pid)
+      for (const survivor of survivors) await taskkillPid(survivor, false)
+      if (survivors.length > 0) {
+        const finalEdges = await listProcessEdges()
+        const stillAlive: number[] = []
+        for (const survivor of finalEdges ? walkProcessTree(finalEdges, pid) : survivors) {
+          if (processAlive(survivor)) stillAlive.push(survivor)
+        }
+        if (stillAlive.length > 0) {
+          note = `process tree termination incomplete: surviving pids ${stillAlive.join(',')}`
+        }
+      }
+    }
   }
   try { child.kill('SIGKILL') } catch { /* gone */ }
+  return note
+}
+
+function taskkillPid(pid: number, tree: boolean): Promise<void> {
+  return new Promise((resolvePromise) => {
+    const args = tree ? ['/PID', String(pid), '/T', '/F'] : ['/PID', String(pid), '/F']
+    const killer = spawn('taskkill', args, { windowsHide: true, stdio: 'ignore' })
+    killer.on('error', () => resolvePromise())
+    killer.on('close', () => resolvePromise())
+    setTimeout(resolvePromise, 5_000)
+  })
+}
+
+/** Existence probe: signal 0 never kills; EPERM means the process exists. */
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === 'EPERM'
+  }
+}
+
+/** One CIM query for all live ParentProcessId → ProcessId edges. Returns
+ *  undefined when the query is unavailable (the taskkill pass still ran). */
+function listProcessEdges(): Promise<Map<number, number[]> | undefined> {
+  return new Promise((resolvePromise) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn('powershell', ['-NoProfile', '-Command',
+        'Get-CimInstance Win32_Process | ForEach-Object { "{0}:{1}" -f $_.ProcessId, $_.ParentProcessId }'
+      ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch {
+      resolvePromise(undefined)
+      return
+    }
+    let output = ''
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL') } catch { /* gone */ }
+      resolvePromise(undefined)
+    }, 10_000)
+    child.stdout?.on('data', (chunk: Buffer) => { output += chunk.toString() })
+    child.on('error', () => { clearTimeout(timer); resolvePromise(undefined) })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) { resolvePromise(undefined); return }
+      const edges = new Map<number, number[]>()
+      for (const line of output.split(/\r?\n/)) {
+        const match = /^(\d+):(\d+)$/.exec(line.trim())
+        if (!match) continue
+        const pid = Number(match[1])
+        const parent = Number(match[2])
+        const list = edges.get(parent)
+        if (list) list.push(pid)
+        else edges.set(parent, [pid])
+      }
+      resolvePromise(edges.size > 0 ? edges : undefined)
+    })
+  })
+}
+
+function walkProcessTree(edges: Map<number, number[]>, root: number): number[] {
+  const found: number[] = []
+  const seen = new Set<number>([root])
+  const stack = [root]
+  while (stack.length > 0) {
+    const current = stack.pop() as number
+    for (const next of edges.get(current) ?? []) {
+      if (!seen.has(next)) {
+        seen.add(next)
+        found.push(next)
+        stack.push(next)
+      }
+    }
+  }
+  return found
 }
 
 function sanitizeCommandLine(command: string, args: string[]): string {

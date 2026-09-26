@@ -60,14 +60,28 @@ export class EvidenceCollector {
     const files = await snapshotFiles(workspacePath)
     const dirty = isGit ? await gitStatus(workspacePath) : new Map<string, string>()
 
+    // Content-first delta: a file counts as changed when its content hash
+    // differs from the comparison snapshot (mtime-only touches do not count);
+    // mtime/size are the fallback when no hash is available. This detects
+    // additional modifications to a file that was already dirty before, in
+    // both the round-so-far and the per-turn view.
+    const contentDeltaFromStart = changedSinceFiles(startSnapshot.files, files)
+    const contentDeltaFromPrev = changedSinceFiles(prevSnapshot.files, files)
+    const deleted = [...startSnapshot.files.keys()].filter((file) => !files.has(file))
+
+    const dirtyOrGone = new Set<string>([...dirty.keys(), ...deleted])
     const changedFiles = isGit
-      ? [...dirty.keys()].filter((file) => !startSnapshot.preexisting.has(file))
-      : changedSinceFiles(startSnapshot.files, files)
-    const turnChangedFiles = isGit
-      ? [...dirty.keys()].filter((file) => !prevSnapshot.dirty.has(file))
-      : changedSinceFiles(prevSnapshot.files, files)
+      ? contentDeltaFromStart.filter((file) => dirtyOrGone.has(file))
+      : contentDeltaFromStart
+    // The turn delta is content-based for git and non-git workspaces alike,
+    // so two continuations that modify the same file each register their own
+    // delta instead of the second one disappearing behind the first.
+    const turnChangedFiles = contentDeltaFromPrev
     const newFiles = changedFiles.filter((file) =>
       isGit ? (dirty.get(file) ?? '').startsWith('?') : !startSnapshot.files.has(file)
+    )
+    const deletedFiles = deleted.filter((file) =>
+      isGit ? (dirty.get(file) ?? '').includes('D') || !dirty.has(file) : true
     )
 
     let gitDiffSummary: string | undefined
@@ -80,7 +94,9 @@ export class EvidenceCollector {
       changedFiles: dedupe(changedFiles).slice(0, MAX_FILES),
       turnChangedFiles: dedupe(turnChangedFiles).slice(0, MAX_FILES),
       newFiles: dedupe(newFiles).slice(0, MAX_FILES),
+      deletedFiles: dedupe(deletedFiles).slice(0, MAX_FILES),
       preexistingChanges: [...startSnapshot.preexisting].slice(0, MAX_FILES),
+      ...(isGit ? { fileStatus: new Map(dirty) } : {}),
       ...(gitDiffSummary ? { gitDiffSummary } : {}),
       toolFacts,
       verification: [],
@@ -102,7 +118,7 @@ export class EvidenceCollector {
     bundle.changedFiles.forEach((file, index) => {
       records.push({
         id: randomUUID(), kind: 'workspace', label: file,
-        detail: bundle.newFiles.includes(file) ? 'created' : 'modified', outcome: 'observed',
+        detail: describeChange(bundle, file), outcome: 'observed',
         provenance: 'tool', observedAt: at(index)
       })
     })
@@ -130,6 +146,16 @@ export class EvidenceCollector {
     }
     return records
   }
+}
+
+/** Accurate per-file change description: created / deleted / modified, with a
+ *  staged marker for paths whose git index column is set. */
+function describeChange(bundle: EvidenceBundle, file: string): string {
+  if (bundle.newFiles.includes(file)) return 'created'
+  if (bundle.deletedFiles.includes(file)) return 'deleted'
+  const status = bundle.fileStatus?.get(file) ?? ''
+  const staged = status.length >= 1 && status[0] !== ' ' && status[0] !== '?'
+  return staged ? 'modified (staged)' : 'modified'
 }
 
 function runDetail(run: VerificationRun): string {
@@ -209,13 +235,19 @@ async function snapshotFiles(root: string): Promise<Map<string, FileStamp>> {
   return found
 }
 
-/** Files that appeared, were touched, or disappeared between two snapshots. */
+/** Files that appeared, were touched, or disappeared between two snapshots.
+ *  When both sides carry a content hash, only a hash difference counts —
+ *  mtime-only touches (checkout, status refresh) are not changes. */
 function changedSinceFiles(before: Map<string, FileStamp>, after: Map<string, FileStamp>): string[] {
   const changed: string[] = []
   for (const [file, stamp] of after) {
     const prev = before.get(file)
-    const contentChanged = prev?.hash !== undefined && stamp.hash !== undefined && prev.hash !== stamp.hash
-    if (prev === undefined || prev.mtimeMs !== stamp.mtimeMs || prev.size !== stamp.size || contentChanged) changed.push(file)
+    if (prev === undefined) { changed.push(file); continue }
+    if (prev.hash !== undefined && stamp.hash !== undefined) {
+      if (prev.hash !== stamp.hash) changed.push(file)
+      continue
+    }
+    if (prev.mtimeMs !== stamp.mtimeMs || prev.size !== stamp.size) changed.push(file)
   }
   for (const file of before.keys()) {
     if (!after.has(file)) changed.push(file)

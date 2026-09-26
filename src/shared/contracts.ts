@@ -122,9 +122,21 @@ export interface ResultSummary {
   verification: string[]
   remaining: string[]
   loopTerminal?: LoopTerminalSummary
+  /** The loop's final decision state (every terminal saves it, so the
+   *  remaining work is always explainable). */
+  decision?: LoopDecisionSummary
   /** Per-requirement coverage when the round ran through the Loop gate. */
   coverage?: RequirementCoverageSummary[]
   createdAt: string
+}
+
+/** Serializable subset of the loop decision that is persisted with the Result. */
+export interface LoopDecisionSummary {
+  decision: 'completed' | 'continue' | 'blocked' | 'failed'
+  reason: string
+  incomplete: string[]
+  knownIssues: string[]
+  validRunIds: string[]
 }
 
 /** A Round plus its mode-specific projection. */

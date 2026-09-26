@@ -88,7 +88,11 @@ export interface EvidenceBundle {
   changedFiles: string[]
   turnChangedFiles: string[]
   newFiles: string[]
+  /** Files present at the round baseline that are gone now (real deletions). */
+  deletedFiles: string[]
   preexistingChanges: string[]
+  /** Git porcelain XY status per changed path (git workspaces only). */
+  fileStatus?: Map<string, string>
   gitDiffSummary?: string
   toolFacts: ToolCallFact[]
   verification: VerificationRun[]

@@ -5,6 +5,7 @@ import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, VerificationExecutorFn, VerificationRun } from '../evidence/evidence'
 import { LoopController } from '../loop/LoopController'
 import type { ProductStore } from '../persistence/ProductStore'
+import { planGuidance } from '../plan/PlanGuidance'
 import type { ResultBuilder } from '../result/ResultBuilder'
 
 export interface RoundEngineDeps {
@@ -56,7 +57,10 @@ export class RoundEngine {
     try {
       const runtime = await this.deps.ensureRuntime()
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
-      const { text } = await runtime.prompt(input.spec)
+      // Plan turns carry product-owned guidance on the SAME DSH session; the
+      // stored plan version keeps the user's original spec verbatim.
+      const prompt = mode === 'plan' ? planGuidance(input.spec) : input.spec
+      const { text } = await runtime.prompt(prompt)
       const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
       const { bundle } = await this.deps.evidence.collect(
         input.session.workspacePath, baseline, baseline, this.deps.takeEvents(), toolFacts, 'completed'
@@ -105,7 +109,14 @@ export class RoundEngine {
         evidence: result.evidence,
         outcome: result.terminal.status === 'completed' ? 'completed' : 'failed',
         loopTerminal: result.terminal,
-        decision: result.decision
+        decision: result.decision,
+        round: {
+          mode: 'loop',
+          turns: [{
+            spec: input.spec,
+            outcome: result.terminal.status === 'completed' ? 'completed' : result.terminal.status === 'blocked' ? 'blocked' : 'failed'
+          }]
+        }
       })
       store.saveResult(round.id, document)
       this.terminate(input.session, round, toRoundStatus(result.terminal.status), result.finalResponse)
@@ -118,7 +129,8 @@ export class RoundEngine {
     }
   }
 
-  /** Finalize an open Plan/Vibe Round; Vibe gets a top-level Result document. */
+  /** Finalize an open Plan/Vibe Round; Vibe gets a top-level Result document
+   *  built from the WHOLE conversation of the round, not the last reply. */
   private async finalize(session: SessionSummary, round: RoundSummary): Promise<void> {
     const { store } = this.deps
     if (round.mode === 'vibe') {
@@ -128,9 +140,29 @@ export class RoundEngine {
       const document = this.deps.resultBuilder.build({
         finalResponse: last?.assistantOutput ?? '',
         evidence,
-        outcome: last?.executionOutcome ?? 'completed'
+        outcome: last?.executionOutcome ?? 'completed',
+        round: {
+          mode: 'vibe',
+          turns: entries.map((entry) => ({ spec: entry.specMarkdown, outcome: entry.executionOutcome }))
+        }
       })
       store.saveResult(round.id, document)
+    } else if (round.mode === 'plan') {
+      // A Plan round also records what the phase produced: every version.
+      const versions = store.listPlanVersions(round.id)
+      if (versions.length > 0) {
+        const evidence = bundleFromRecords(store.listEvidence(round.id))
+        const document = this.deps.resultBuilder.build({
+          finalResponse: versions.at(-1)?.planMarkdown ?? '',
+          evidence,
+          outcome: 'completed',
+          round: {
+            mode: 'plan',
+            turns: versions.map((version) => ({ spec: version.submittedSpec, outcome: 'completed' as const }))
+          }
+        })
+        store.saveResult(round.id, document)
+      }
     }
     round.status = 'completed'
     round.updatedAt = new Date().toISOString()
@@ -180,6 +212,7 @@ export class RoundEngine {
 function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
   const changedFiles: string[] = []
   const newFiles: string[] = []
+  const deletedFiles: string[] = []
   const verification: VerificationRun[] = []
   let gitDiffSummary: string | undefined
   for (const record of records) {
@@ -187,6 +220,7 @@ function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
     if (record.kind === 'workspace') {
       changedFiles.push(record.label)
       if (record.detail === 'created') newFiles.push(record.label)
+      if (record.detail === 'deleted') deletedFiles.push(record.label)
     } else if (record.kind === 'command') {
       verification.push({
         id: record.id, turn: record.turn ?? 1, label: record.label,
@@ -202,7 +236,7 @@ function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
     }
   }
   return {
-    changedFiles, turnChangedFiles: [], newFiles, preexistingChanges: [],
+    changedFiles, turnChangedFiles: [], newFiles, deletedFiles, preexistingChanges: [],
     ...(gitDiffSummary ? { gitDiffSummary } : {}), toolFacts: [], verification, outcome: 'completed'
   }
 }

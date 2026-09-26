@@ -46,7 +46,11 @@ function EvidenceList({ evidence }: { evidence: EvidenceSummary[] }): React.JSX.
 }
 
 function RoundView({ round }: { round: RoundDetail }): React.JSX.Element {
-  const [versionIndex, setVersionIndex] = useState(Math.max(round.planVersions.length - 1, 0))
+  const latestVersionIndex = Math.max(round.planVersions.length - 1, 0)
+  const [versionIndex, setVersionIndex] = useState(latestVersionIndex)
+  // A new Plan version (Plan×N) jumps the view to the latest; manual tab
+  // selection still works until the next version arrives.
+  useEffect(() => { setVersionIndex(latestVersionIndex) }, [latestVersionIndex])
   const header = <div className="document-header">
     <div className="eyebrow">ROUND {round.sequence} · {modeLabels[round.mode]}</div>
     <h1>{round.title}</h1>
@@ -248,6 +252,10 @@ function App(): React.JSX.Element {
     try {
       await window.temporal.saveDraft(latest.current.draft, latest.current.mode)
       await window.temporal.submit(spec, latest.current.mode)
+      // The product owns the draft after a submit (it clears/replaces it);
+      // stop treating the local editor as the source of truth so incoming
+      // snapshots refresh the editor again.
+      localDraftDirty.current = false
       applySnapshot(await window.temporal.getSnapshot())
     } catch (e) { setError(messageOf(e)) }
     finally { setBusy(false) }

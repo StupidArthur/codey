@@ -38,6 +38,7 @@ const { EvidenceCollector } = await bundle('src/main/evidence/EvidenceCollector.
 const { VerificationExecutor } = await bundle('src/main/evidence/VerificationExecutor.ts', join(here, '.cache-domain-verify.cjs'))
 const { ResultBuilder } = await bundle('src/main/result/ResultBuilder.ts', join(here, '.cache-domain-result.cjs'))
 const { LoopController, DEFAULT_LOOP_BUDGET } = await bundle('src/main/loop/LoopController.ts', join(here, '.cache-domain-loop.cjs'))
+const { TURN_DEADLINE_MESSAGE } = await bundle('src/main/dsh/DshRuntime.ts', join(here, '.cache-domain-runtime.cjs'))
 
 const checks = {}
 const check = (name, value) => { checks[name] = Boolean(value) }
@@ -175,7 +176,12 @@ function emptySnapshot() {
 }
 function fakeLoop({ prompts, bundles }) {
   let turn = 0
-  const runtime = { prompt: async () => { const step = prompts[Math.min(turn, prompts.length - 1)]; turn += 1; if (step instanceof Error) throw step; return { text: step } } }
+  const decisionBlock = () => '```temporal-decision\n' + JSON.stringify({
+    decision: 'incomplete', reason: 'work remains',
+    coverage: [{ item: 'task', status: 'unmet', evidence: [] }],
+    incomplete: ['work'], nextAction: 'keep going'
+  }) + '\n```'
+  const runtime = { prompt: async () => { const step = prompts[Math.min(turn, prompts.length - 1)]; turn += 1; if (step instanceof Error) throw step; return { text: `${step}\n\n${decisionBlock()}` } } }
   const collector = {
     baseline: async () => emptySnapshot(),
     collect: async () => ({ bundle: bundles[Math.min(turn - 1, bundles.length - 1)], snapshot: emptySnapshot() })
@@ -183,14 +189,16 @@ function fakeLoop({ prompts, bundles }) {
   return { controller: new LoopController(runtime, collector), turns: () => turn }
 }
 function emptyBundle(extra = {}) {
-  return { changedFiles: [], turnChangedFiles: [], newFiles: [], preexistingChanges: [], toolFacts: [], verification: [], outcome: 'completed', ...extra }
+  return { changedFiles: [], turnChangedFiles: [], newFiles: [], deletedFiles: [], preexistingChanges: [], toolFacts: [], verification: [], outcome: 'completed', ...extra }
 }
 
 const noProgressInput = { rootSpec: 'do something', workspacePath: root, permission: 'workspace-write', takeEvents: () => [] }
 const noProgress = fakeLoop({ prompts: ['still working'], bundles: [emptyBundle()] })
 const noProgressResult = await noProgress.controller.run(noProgressInput)
 check('loop_no_progress_fails', noProgressResult.terminal.status === 'failed' && noProgressResult.terminal.reason.includes('No progress'))
-check('loop_no_progress_budget', noProgress.turns() === DEFAULT_LOOP_BUDGET.maxNoProgress)
+// Turn 1 establishes the model's coverage state and counts as progress; the
+// following maxNoProgress turns add nothing.
+check('loop_no_progress_budget', noProgress.turns() === DEFAULT_LOOP_BUDGET.maxNoProgress + 1)
 
 const error = fakeLoop({
   prompts: [new Error('boom'), new Error('boom'), 'unused'],
@@ -237,16 +245,77 @@ check('loop_wall_clock_boundary', atResult.terminal.status === 'budget_exhausted
 let belowClock = 0
 let belowTurn = 0
 const belowCounter = { n: 0 }
+const decisionBlockText = () => '```temporal-decision\n' + JSON.stringify({ decision: 'incomplete', reason: 'r', coverage: [], incomplete: ['work'], nextAction: '' }) + '\n```'
 const belowResult = await new LoopController(
-  { prompt: async () => { belowTurn += 1; belowClock = belowTurn === 1 ? DEFAULT_LOOP_BUDGET.maxElapsedMs - 1 : DEFAULT_LOOP_BUDGET.maxElapsedMs; return { text: 'still missing required item' } } },
+  { prompt: async () => { belowTurn += 1; belowClock = belowTurn === 1 ? DEFAULT_LOOP_BUDGET.maxElapsedMs - 1 : DEFAULT_LOOP_BUDGET.maxElapsedMs; return { text: `still missing required item\n\n${decisionBlockText()}` } } },
   progressCollector(belowCounter),
   DEFAULT_LOOP_BUDGET,
   () => belowClock
 ).run(noProgressInput)
 check('loop_wall_clock_just_below_then_cross', belowResult.terminal.status === 'budget_exhausted' && belowTurn === 2)
 
-const blocked = fakeLoop({ prompts: ['[BLOCKED] needs user approval'], bundles: [emptyBundle()] })
-const blockedResult = await blocked.controller.run(noProgressInput)
+// Budget is checked BEFORE a turn starts: once the clock crosses the
+// deadline (here: during turn 1's collection), no further model round is
+// entered.
+let overClock = 0
+let overTurns = 0
+const overResult = await new LoopController(
+  { prompt: async () => { overTurns += 1; return { text: 'still working' } } },
+  {
+    baseline: async () => emptySnapshot(),
+    collect: async () => {
+      overClock = DEFAULT_LOOP_BUDGET.maxElapsedMs
+      return { bundle: emptyBundle({ changedFiles: ['a.ts'], turnChangedFiles: ['a.ts'] }), snapshot: emptySnapshot() }
+    }
+  },
+  DEFAULT_LOOP_BUDGET,
+  () => overClock
+).run(noProgressInput)
+check('loop_no_turn_after_deadline', overResult.terminal.status === 'budget_exhausted' && overTurns === 1)
+
+// A nominally complete state that arrives at/after the deadline is not
+// accepted as completion: the full real gate (evaluator + executor) passes,
+// but the clock says the budget is spent by the time completion is judged.
+const gateRootLate = await mkdtemp(join(tmpdir(), 'temporal-gate-late-'))
+let lateClock = 0
+const lateRuntime = {
+  prompt: async () => {
+    lateClock = DEFAULT_LOOP_BUDGET.maxElapsedMs - 5_000
+    await mkdir(join(gateRootLate, 'src'), { recursive: true })
+    await writeFile(join(gateRootLate, 'src', 'answer.txt'), 'verify\n')
+    return { text: `done\n\n\`\`\`temporal-decision\n${JSON.stringify({ decision: 'completed', reason: 'file created with required content', coverage: [{ item: 'src/answer.txt content', status: 'met', evidence: ['e1'] }], incomplete: [], nextAction: '' })}\n\`\`\`` }
+  }
+}
+const lateExecutor = new VerificationExecutor()
+const lateResult = await new LoopController(
+  lateRuntime,
+  new EvidenceCollector(),
+  DEFAULT_LOOP_BUDGET,
+  () => lateClock,
+  async (request) => {
+    lateClock = DEFAULT_LOOP_BUDGET.maxElapsedMs
+    return lateExecutor.run(request)
+  }
+).run({ rootSpec: 'Create a file src/answer.txt whose contents are exactly: verify', workspacePath: gateRootLate, permission: 'workspace-write', takeEvents: () => [] })
+check('loop_completed_after_deadline_not_accepted', lateResult.terminal.status === 'budget_exhausted' && lateResult.terminal.reason.includes('not accepted as completed'))
+
+// A deadline termination of a prompt turn is budget exhaustion, classified
+// before the repeated-error rule can rename it to 'failed'.
+const deadlineResult = await new LoopController(
+  { prompt: async () => { throw new Error(TURN_DEADLINE_MESSAGE) } },
+  { baseline: async () => emptySnapshot(), collect: async () => ({ bundle: emptyBundle({ outcome: 'failed' }), snapshot: emptySnapshot() }) },
+  DEFAULT_LOOP_BUDGET
+).run(noProgressInput)
+check('loop_deadline_failure_is_budget_exhausted', deadlineResult.terminal.status === 'budget_exhausted' && deadlineResult.terminal.reason.includes('wall-clock budget during a model turn'))
+
+// Plain-text [BLOCKED] is honored only when no structured decision exists
+// (the fallback path); a decision block saying blocked is covered in the
+// decision-gate probe.
+const blockedResult = await new LoopController(
+  { prompt: async () => ({ text: '[BLOCKED] needs user approval' }) },
+  { baseline: async () => emptySnapshot(), collect: async () => ({ bundle: emptyBundle(), snapshot: emptySnapshot() }) },
+  { ...DEFAULT_LOOP_BUDGET, maxContinuations: 1 }
+).run(noProgressInput)
 check('loop_blocked', blockedResult.terminal.status === 'blocked')
 
 // Positive path: completion only through the real collector, the real
@@ -258,14 +327,14 @@ const gateRuntime = {
   prompt: async () => {
     await mkdir(join(gateRoot, 'src'), { recursive: true })
     await writeFile(join(gateRoot, 'src', 'answer.txt'), 'verify\n')
-    return { text: 'done' }
+    return { text: `done\n\n\`\`\`temporal-decision\n${JSON.stringify({ decision: 'completed', reason: 'file created with required content', coverage: [{ item: 'src/answer.txt content', status: 'met', evidence: ['e1'] }], incomplete: [], nextAction: '' })}\n\`\`\`` }
   }
 }
 const gateEvidence = new EvidenceCollector()
 const gateController = new LoopController(gateRuntime, gateEvidence, DEFAULT_LOOP_BUDGET, Date.now, new VerificationExecutor().run)
 const gateSpec = 'Create a file src/answer.txt whose contents are exactly: verify'
 const gateResult = await gateController.run({ rootSpec: gateSpec, workspacePath: gateRoot, permission: 'workspace-write', takeEvents: () => [] })
-check('loop_completes_with_valid_evidence', gateResult.terminal.status === 'completed' && gateResult.terminal.reason.includes('req-1'))
+check('loop_completes_with_valid_evidence', gateResult.terminal.status === 'completed' && gateResult.terminal.reason.includes('validated the citations'))
 check('loop_completed_evidence_is_builtin_content_fact', gateResult.evidence.verification.some(
   (run) => run.outcome === 'passed' && run.method === 'builtin' && run.facts.some((fact) => fact.kind === 'content-equals' && fact.matched)
 ))
@@ -287,7 +356,8 @@ const runtime = {
   prompt: async () => {
     fileCounter += 1
     await writeFile(join(engineRoot, `artifact-${fileCounter}.txt`), 'x')
-    return { text: `output ${fileCounter}` }
+    const decision = JSON.stringify({ decision: 'completed', reason: 'artifact written', coverage: [{ item: 'artifact', status: 'met', evidence: ['e1'] }], incomplete: [], nextAction: '' })
+    return { text: `output ${fileCounter}\n\n\`\`\`temporal-decision\n${decision}\n\`\`\`` }
   }
 }
 const evidence = new EvidenceCollector()
@@ -330,7 +400,25 @@ const loopResult = engineSession.getResult(loopRound.id)
 check('loop_creates_new_terminal_round', rounds.length === 3 && loopRound.mode === 'loop' && loopRound.status === 'completed')
 check('loop_result_terminal', loopResult?.loopTerminal?.status === 'completed')
 check('loop_result_requirement_coverage', Array.isArray(loopResult?.coverage) && loopResult.coverage.length >= 1 && loopResult.coverage.every((item) => item.status === 'satisfied'))
+check('loop_result_saves_decision', loopResult?.decision?.decision === 'completed' && Array.isArray(loopResult.decision.validRunIds))
 check('evidence_persisted', engineSession.listEvidence(loopRound.id).some((record) => record.kind === 'workspace'))
+
+// A passed run that is no longer in the decision's validRunIds is marked as
+// historical in the Result — it never poses as the current verification.
+{
+  const builder = new ResultBuilder()
+  const runNow = { id: 'run-now', label: 'now', method: 'builtin', command: 'builtin:content-equals a.txt', exitCode: 0, signal: null, outputTail: '', scope: 'file', targets: ['a.txt'], facts: [], stamps: new Map(), outcome: 'passed', at: new Date().toISOString() }
+  const runStale = { ...runNow, id: 'run-stale', label: 'stale' }
+  const doc = builder.build({
+    finalResponse: 'r', outcome: 'failed',
+    evidence: { changedFiles: ['a.txt'], turnChangedFiles: ['a.txt'], newFiles: ['a.txt'], deletedFiles: [], preexistingChanges: [], toolFacts: [], verification: [runStale, runNow], outcome: 'failed' },
+    loopTerminal: { status: 'failed', reason: 'no progress' },
+    decision: { decision: 'continue', reason: 'r', items: [], incomplete: ['x'], knownIssues: ['k'], nextPrompt: '', nextChecks: [], sandboxScripts: [], validRunIds: ['run-now'] },
+    round: { mode: 'loop', turns: [{ spec: 's', outcome: 'failed' }] }
+  })
+  check('result_marks_historical_passes', doc.verification.some((line) => line.includes('stale') && line.includes('历史')) && doc.verification.some((line) => line.includes('now') && !line.includes('历史')))
+  check('result_decision_persisted_on_failure', doc.decision?.decision === 'continue' && doc.decision.knownIssues.includes('k'))
+}
 engineSession.close()
 
 const passed = Object.values(checks).every(Boolean)

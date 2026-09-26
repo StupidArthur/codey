@@ -214,3 +214,82 @@ TEMPORAL_TEST_API_KEY=<用户提供> node scripts/probes/installed-app-ui.mjs
 1. **Windows 下任意命令无沙箱是设计决定而非遗漏**：正式 Loop Spec 的 `Run:`/`Verify:` 验证在 `workspace-write`/`read-only` 下记录 `denied` + 可操作原因且不执行；只有内建只读检查（存在性/内容/JSON 字段）在这些 preset 下可用。需求描述需可被内建检查验证，或显式以 `danger-full-access` 运行。
 2. **DSH 工具失败的恢复识别仍按“同 title 后续 completed”**：公开 ACP 不传输工具输入/输出，无法更窄匹配；该局限已在文档记录。
 3. `field-equals` 仅支持 `.json`（`JSON.parse`）；YAML/TOML 等格式无法自动核验 → 条件保持 unknown。
+
+## 六、TODO 6 — Plan / Vibe / Loop 的真实语义（2026-09-26）
+
+本单把完成判定的语义权威从"固定关键词解析"转回"模型理解 + 产品校验"：模型对任意自然语言 Markdown Spec 做语义覆盖判断；产品只校验可程序化判定的事实——证据存在与有效、引用真实性、明显矛盾、预算与状态。"完成需要证据"不再等于"用正则完整解析任意 Spec"。
+
+### 关键技术决定（TODO 6 新增）
+
+| 决定 | 原因 |
+| --- | --- |
+| 结构化模型决策 `temporal-decision` | 每轮回复以 fenced JSON 结尾：`{decision: completed\|incomplete\|blocked, reason, coverage[{item,status,evidence[]}], incomplete[], nextAction}`；解析取**最后一个**块；缺失/损坏时一次性严格重问（`decisionReAskPrompt`），再失败该轮按 incomplete 计。纯文本 `[BLOCKED]` 只在无结构化决策时作为回退候选信息。 |
+| 完成门槛 = 模型判断 + 产品校验 | coverage 全 `met`（`uncertain` 永不完成）、每条引用存在、≥1 条当前有效且相关的 **PASSED 验证**引用；产品**无可运行检查**时允许引用产品快照核实过的工作区产物（wN）；无反证（检查后目标再改/产物缺失/失败未清除/未恢复工具失败/本轮零改动零验证）。模型一句 done 永远不够。 |
+| 证据清单稳定编号 | `e1..eN` 按验证运行追加顺序稳定编号（跨轮不漂移）；`w1..wN` 按本轮 `changedFiles` 首次出现顺序，存在性由产品快照核实（文件已删除的产物不可再引用）。模型只能引用清单中存在的 id。 |
+| 被拒完成的再引导 | 完成声明被产品拒绝时，续行提示明确告知"上一条完成声明未被接受"并要求重新声明、引用清单中的有效证据 id；验收标准不放宽。 |
+| hash-first 证据有效性 | `runValid` 与采集器同语义：双方都有内容哈希时以内容为准（同内容重写不使证据失效，仅真实内容变更失效）；无哈希时回退 mtime+size 比对。`changedTurnByFile` 仍按轮次拒绝"检查之后又改"的运行。 |
+| 沙盒验证脚本由产品落盘 | workspace-write 下产品写 `temporal-verify/<kind>.cmd`（内部 `call <script>`——修复批处理直接调用 npm/pnpm 这类批文件时控制权转移、`%ERRORLEVEL%` 行永不执行的问题），模型在 DSH 内运行 `cmd /c temporal-verify\<kind>.cmd`，产品内建检查读取真实 `<kind>.exit` 退出码工件（targets 同时锚定 `.log`，缺失或事后修改即失效）。read-only 无脚本方法；danger-full-access 保留直接 shell。 |
+| 无进展判定 = 有意义变化 | 内容哈希级 turn delta + **全新**通过的检查对象（`method\|command\|targets` 签名，同一对象重复通过不计数）+ 未完成项收缩（产品解析 items 与模型 coverage 双向计数）。 |
+| Plan = 引导路径 | 实测 DSH 0.1.7-rc.2 不暴露 session modes（`modes: null`）。Plan 通过 `PlanGuidance` 引导词实现"只计划不实现"；Plan×N = 单 Round 多版本；模式切换 finalize 计划轮；跨模式共用同一 DSH Session。 |
+| blocked 终态前先跑完产品检查 | 模型 blocked 是最终决定，但产品先执行已建议的检查再落终态，使 Remaining 如实点名"什么通过了、什么缺失"；所有终态都保存 decision 与可用证据。 |
+| Result 面向整轮 | `ResultBuilder` 以整轮 round 上下文构建：vibe 全部 entries、plan 全部版本、loop 单轮终态；**历史**轮次的通过检查明确标注，不再冒充本轮验证；`End Round` ≠ 任务成功。 |
+
+### 阶段 1 — 可靠性修复
+
+| 项 | 证据 | 结果 |
+| --- | --- | --- |
+| 1.1 Session 独占与恢复顺序 | `scripts/probes/session-exclusivity.mjs` **16/16**：先取得所有权再 reconcile；第二窗口打开被拒时首窗口 Round/runtime_active/执行不变（直读 SQLite 断言）；锁丢失窗口不能重启运行时或修改受保护状态；打开失败清理新锁且不丢旧窗口有效所有权 | 通过 |
+| 1.2 Git evidence 每轮 delta | `scripts/probes/git-evidence-delta.mjs` **20/20**：hash-first 内容级逐轮增量（同文件本轮追加修改不再丢失）；执行前存量改动归属保留；modified/staged/untracked/deleted 全覆盖 | 通过 |
+| 1.3 墙钟预算 + 进程回收 | `verify-permissions-impl.mjs` **24/24**（两次运行稳定）；`temporal-domain.mjs`：进 turn 前检查预算、mid-turn deadline 经公开 `session/cancel` 真实中断（`TURN_DEADLINE_MESSAGE`，进程树回收失败如实记录）、deadline 后到达的"名义完成"不被接受、deadline 导致的失败归类 `budget_exhausted` 而非 failed | 通过 |
+
+### 阶段 2 — Plan 行为
+
+| 项 | 证据 | 结果 |
+| --- | --- | --- |
+| Plan 引导路径（无原生 modes） | `scripts/probes/plan-behavior.mjs` **13/13**：Plan 提交不产生实现产物（引导词生效）；Plan×N = 单 Round 版本递增；Plan→Vibe 切换 finalize 计划轮；同一 DSH Session 跨模式复用；Vibe 照常实现 | 通过 |
+
+### 阶段 3 — 自然语言 Loop 与可用验证（确定性部分）
+
+| 项 | 证据 | 结果 |
+| --- | --- | --- |
+| 决策门控 | `scripts/probes/loop-decision-gate.mjs` **43/43**：解析（最后块生效、损坏 JSON、坏枚举、坏 evidence 类型、空 reason、非对象）；缺失块一次性重问后恢复完成；ghost/uncertain/stale/失败未清除拒绝完成；有效完成被接受且 `validRunIds` 记录；模型 blocked 终态并保存剩余项；无决策 continue 且记 known issue | 通过 |
+| 无进展语义 | 同探针：重复同一检查对象的通过不算进展（no-progress 失败）；coverage 收缩算进展（直到 continuation 预算终止，绝不死于"无进展"） | 通过 |
+| 沙盒验证脚本 | 同探针：workspace-write 产出 wrapper（`call npm test`）；真实运行产生 `tests.exit`；`wrapper_wrote_real_exit_code`、通过/失败两例由产品内建检查如实判定；read-only 无脚本方法；dfa 保留直接 shell | 通过 |
+| 产物证据（非代码任务） | 同探针：主观任务引用 w1 可完成；有可运行检查时仅产物引用不足（必须引用通过验证）；已删除产物引用被拒 | 通过 |
+
+### 阶段 3（续）— 真实模型端到端（`scripts/probes/loop-real-model.mjs`，19/19）
+
+正式路径：`WindowController → RoundEngine.submitLoop → LoopController → DshRuntime（真实 DSH）→ EvidenceCollector → VerificationExecutor → ResultBuilder`。凭证走环境变量，不落盘、不打印。
+
+| 项 | 证据 | 结果 |
+| --- | --- | --- |
+| 长自然语言代码任务 | A：40 行 Markdown（标题/代码块/列表/末尾要求）要求修复 `calc.js` 的 `add` 真实 bug，不用任何解析器关键词。模型在 DSH 内执行产品落盘的 `temporal-verify\tests.cmd`；产品读取真实 `tests.exit=0`（sha1 记录）；`code_add_actually_fixed`、`code_tests_content_intact`（tests/ 未被改动）、单 Loop Round `completed`、`remaining: []` | 通过 |
+| 非代码任务（文档） | B：NOTES.md 文档任务 → `completed`；模型引用 `e3（文件检查通过）, w2（工作区产物）, e4（主动重跑测试包装器）, w1`；705 字符正文落盘；更早一次失效的检查被如实标注「历史:曾通过，不再是当前有效验证」 | 通过 |
+| 半成品负例（确定性脚本模型 + 真实采集/执行器） | C：模型只完成简单一半（写 FIXNOTES.md）并每轮声称完成引用 e1 → 产品检查：文件检查通过但 tests 缺失/失败 → 永不 completed；`half_done_names_the_gap`（Remaining 点名 tests 缺口）、`half_done_bug_not_fixed_by_claim`（一句 done 不会修复 bug） | 通过 |
+
+### 阶段 4 — 整轮 Result
+
+| 项 | 证据 | 结果 |
+| --- | --- | --- |
+| Result 面向整轮 | `ResultBuilder.build` 接收整轮 round 上下文：vibe 全部 entries（`vibe_finalize_builds_result`）、plan 全部版本（`plan_two_versions`）、loop 单轮终态（`loop_result_terminal`） | 通过 |
+| 历史通过不再冒充当前验证 | `result_marks_historical_passes`：不在 `validRunIds` 中的通过运行标注「历史:曾通过，但其目标此后已变化」；真实模型 B 场景的 Result 中同样出现该标注 | 通过 |
+| decision 随终态持久化 | `loop_result_saves_decision`（completed）与 `result_decision_persisted_on_failure`（failed 亦保存 reason/incomplete/knownIssues/validRunIds）；`contracts.ts` 新增 `LoopDecisionSummary` | 通过 |
+| End Round ≠ 任务成功 | Vibe/Plan 的 End Round 构建的是如实摘要（无验证即显示「未运行产品验证」）；Loop 终态完全由 `loopTerminal` 决定 | 通过 |
+
+### 阶段 5 — 渲染器、打包与安装后验收
+
+| 项 | 证据 | 结果 |
+| --- | --- | --- |
+| 提交后草稿恢复刷新 | `src/renderer/src/main.tsx`：submit 成功后清除 `localDraftDirty`，产品重新成为草稿事实源（产品在提交后清空/接管草稿，编辑器不再滞留旧文） | 通过（tsc + build） |
+| Plan 新版本到达即跳到最新 | `RoundView` 对 `planVersions.length` 增加时 `setVersionIndex` 到最新；新版本到达前手动切换仍有效 | 通过（tsc + build） |
+| 生产构建 | `pnpm exec electron-vite build`（main/preload/renderer）+ `pnpm dist:win` 退出码 0，`release\Temporal Workspace Setup 0.1.0.exe` 重新生成并静默安装（`/S`，安装后 exe 时间戳更新） | 通过 |
+| **安装后 e2e（真实模型，打包应用）** | `installed-app-e2e.mjs`（CDP 驱动打包应用的渲染器，走真实产品 IPC）：`vibe` completed + NOTES.md 落盘（13 条证据）；`loop` **新语义下 completed**（loopTerminal=completed，content-match 证据在案）；`loopNegative` blocked 不 completed、Remaining 4 行点名 sealed.md、sealed.md 不存在、content-match 证据在案；`loopVerifyWrite` read-only 下 blocked、**denied 验证证据在案**、Remaining 含 denied 原因、verify-write.md 未创建；`readonly` completed（End Round）但无文件写入 | 通过（5 场景，`passed: true`） |
+| **安装后 UI 实测（可见桌面）** | `installed-app-ui.mjs`（`passed: true`）：真实 OS 窗口（`Temporal Workspace/10030762`）；Plan×2 → `timelineCount: 1`、`versionTabs: 2`；Runner 打开/收起/mini 恢复全 true；Vibe End Round 渲染 Result；**Loop A（新语义）`loop-completed`**：终态文案为「模型判定完成 + 产品验证引用：e1 (content-equals)、e2 (file-exists) (cited: e1, e2)」，`remainingLines: []`、产物落盘；**Loop B `loop-blocked`**：模型如实解释回复格式指令与决策协议的冲突，Remaining 列出未覆盖项（产品解析 + 模型自述）与「无验证证据」，未渲染成成功 | 通过 |
+
+### 未运行项与边界（TODO 6 新增）
+
+1. **完成的语义权威是模型的 coverage 判断**：产品不（也无法）从任意自然语言中重新推导任务语义；产品校验的是引用存在、证据有效、无反证、预算与状态。内置 RequiredSpec 解析降级为展示与检查建议，不再充当完成门槛。
+2. **引用与条目的语义关联由模型负责**：产品能证明"引用的证据存在且有效且通过"，不能证明"该证据在语义上恰好覆盖该条目"；当产品存在可运行检查时，要求至少引用一条通过验证作为兜底。
+3. **沙盒验证依赖模型在 DSH 内执行产品写好的 wrapper**：模型不执行时检查缺失工件 → 判定失败/不通过，循环继续引导（含明确的重新引用提示）；不存在绕过模型的通道，也不把模型自报的退出码当证据。
+4. **DSH 0.1.7-rc.2 能力边界不变**：无 session modes（Plan 为引导路径）、工具调用无退出码（Verification 由产品自有执行器实跑）——均为实测并沿用 TODO 5 的决定。
+5. `field-equals` 仅支持 `.json`（沿用）；YAML/TOML 等格式由模型判断 + 产物证据覆盖。

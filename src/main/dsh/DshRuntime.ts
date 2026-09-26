@@ -10,6 +10,13 @@ import type { ToolCallFact } from '../evidence/evidence'
 import { resolveInstalledDshBin } from './SessionDiscovery'
 import { TurnProjector, type ProjectedEvent } from './projection'
 
+/** Thrown when a prompt turn hits its deadline: the turn was cancelled via
+ *  the public `session/cancel` notification (or abandoned after a grace
+ *  period when even that did not settle). Consumers must treat this as a
+ *  deadline termination, not a generic runtime error. */
+export const TURN_DEADLINE_MESSAGE = 'DSH turn deadline exceeded (cancelled via session/cancel)'
+const TURN_CANCEL_GRACE_MS = 8_000
+
 export interface DshRuntimeOptions {
   workspacePath: string
   settings: ModelSettings
@@ -127,7 +134,7 @@ export class DshRuntime {
     }
   }
 
-  async prompt(spec: string): Promise<{ text: string }> {
+  async prompt(spec: string, opts?: { timeoutMs?: number }): Promise<{ text: string }> {
     if (this.closed) throw new Error('DSH runtime has been closed')
     if (!spec.trim()) throw new Error('Spec must not be empty')
     if (this.busy) throw new Error('DSH session is already running')
@@ -140,22 +147,62 @@ export class DshRuntime {
     this.projector = projector
     this.turnToolFacts = []
     const controller = new AbortController()
-    const timeoutMs = this.options.requestTimeoutMs ?? 0
-    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined
+    const timeoutMs = opts?.timeoutMs ?? this.options.requestTimeoutMs ?? 0
+    let deadlineHit = false
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          deadlineHit = true
+          controller.abort()
+          // Public ACP cancellation: the agent stops the turn, so the pending
+          // session/prompt settles instead of keeping the resources busy.
+          void this.cancelTurn()
+        }, timeoutMs)
+      : undefined
     try {
-      await connection.agent.request(
+      const request = connection.agent.request(
         'session/prompt',
         { sessionId, prompt: [{ type: 'text', text: spec }] },
         timeoutMs > 0 ? { cancellationSignal: controller.signal } : undefined
       )
+      const result = timeoutMs > 0
+        ? await Promise.race([
+            request,
+            delay(timeoutMs + TURN_CANCEL_GRACE_MS).then(() => null)
+          ])
+        : await request
+      if (deadlineHit || result === null) {
+        // A deadline may either have been cancelled by the agent (result) or,
+        // when even the cancel did not settle the request in time, rejected
+        // here after the grace period. Both are deadline terminations.
+        throw new Error(TURN_DEADLINE_MESSAGE)
+      }
       return { text: projector.assistantText }
     } catch (error) {
+      if (deadlineHit) {
+        this.emit({ kind: 'error', message: TURN_DEADLINE_MESSAGE })
+        throw new Error(TURN_DEADLINE_MESSAGE)
+      }
       this.emit({ kind: 'error', message: messageOf(error) })
       throw error
     } finally {
       if (timer) clearTimeout(timer)
       this.projector = undefined
       this.busy = false
+    }
+  }
+
+  /** Ask the agent to stop the current turn through the public ACP
+   *  `session/cancel` notification. Resolves false when no turn is active or
+   *  the notification could not be delivered. */
+  async cancelTurn(): Promise<boolean> {
+    const connection = this.connection
+    const sessionId = this.sessionId
+    if (!connection || !sessionId || this.closed) return false
+    try {
+      await connection.agent.notify('session/cancel', { sessionId })
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -169,7 +216,11 @@ export class DshRuntime {
     this.projector = undefined
     if (connection && sessionId) {
       try {
-        await connection.agent.request('session/close', { sessionId })
+        // Bounded: a wedged agent must not keep the window's teardown waiting.
+        await Promise.race([
+          connection.agent.request('session/close', { sessionId }),
+          delay(3_000)
+        ])
       } catch { /* the runtime may already be gone */ }
     }
     connection?.close()
