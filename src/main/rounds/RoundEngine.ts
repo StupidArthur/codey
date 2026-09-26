@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunnerEvent, SessionSummary } from '../../shared/contracts'
-import type { DshRuntime } from '../dsh/DshRuntime'
-import { TURN_CANCELLED_MESSAGE } from '../dsh/DshRuntime'
+import type { AgentRuntime } from '../runtime/AgentRuntime'
+import { TURN_CANCELLED_MESSAGE } from '../runtime/AgentRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, VerificationExecutorFn, VerificationRun } from '../evidence/evidence'
 import { LoopController } from '../loop/LoopController'
@@ -12,7 +12,7 @@ import type { ResultBuilder } from '../result/ResultBuilder'
 export interface RoundEngineDeps {
   store: ProductStore
   /** Lazily start the runtime composition for this product mode. */
-  ensureRuntime: (mode: RoundMode) => Promise<DshRuntime>
+  ensureRuntime: (mode: RoundMode) => Promise<AgentRuntime>
   evidence: EvidenceCollector
   resultBuilder: ResultBuilder
   /** Returns and clears the runner events accumulated since the last execution. */
@@ -21,8 +21,6 @@ export interface RoundEngineDeps {
   verify?: VerificationExecutorFn
   /** True after the user requests cancellation of the current submit. */
   isCancellationRequested?: () => boolean
-  /** Persist the DSH session id after a lazy create. */
-  onDshSessionCreated?: (dshSessionId: string) => void
   /** High-level phase timing for performance diagnostics. */
   onDiagnostic?: (type: string, payload?: unknown) => void
   onRoundChanged?: () => Promise<void> | void
@@ -68,12 +66,12 @@ export class RoundEngine {
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
       this.deps.onDiagnostic?.('evidence.baseline.end', { mode, roundId: round.id, durationMs: Date.now() - baselineStartedAt })
       throwIfCancelled(this.deps.isCancellationRequested)
-      // Plan turns carry product-owned guidance on the SAME DSH session; the
+      // Plan turns carry product-owned guidance on the SAME OpenCode session; the
       // stored plan version keeps the user's original spec verbatim.
       const prompt = mode === 'plan' ? planGuidance(input.spec) : input.spec
       const promptStartedAt = Date.now()
       this.deps.onDiagnostic?.('model.prompt.start', { mode, roundId: round.id })
-      const { text } = await runtime.prompt(prompt)
+      const { text } = await runtime.prompt(prompt, { agent: mode === 'plan' ? 'plan' : 'build' })
       this.deps.onDiagnostic?.('model.prompt.end', { mode, roundId: round.id, durationMs: Date.now() - promptStartedAt, chars: text.length })
       const toolFacts = (runtime.takeToolFacts?.() ?? []).map((fact) => ({ ...fact, turn: 1 }))
       const collectStartedAt = Date.now()
