@@ -9,3 +9,6 @@ release/
 *.tsbuildinfo
 *.log
 scripts/probes/.cache-*.cjs
+
+# Prepared pinned OpenCode runtime binary (downloaded by scripts/prepare-opencode.ps1)
+vendor/opencode/
