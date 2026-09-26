@@ -189,15 +189,32 @@ export class DshRuntime {
     for (const event of projector.drain()) this.emit(event)
   }
 
+  /**
+   * Honour the session's permission preset instead of blindly approving.
+   * DSH enforces the sandbox, but it still asks the client for approval on
+   * operations that cross the mode's boundary (notably shell commands). A
+   * `read-only` session may only approve read-only tool kinds; anything that
+   * could modify the workspace is rejected, so the preset cannot be escalated
+   * by the client. `workspace-write` and `danger-full-access` approve, leaving
+   * the workspace boundary to DSH's sandbox.
+   */
   private onPermission(params: RequestPermissionRequest): { outcome: { outcome: 'selected'; optionId: string } } | { outcome: { outcome: 'cancelled' } } {
     const options = params.options ?? []
     const allow = options.find((option) => option.kind === 'allow_once') ?? options.find((option) => option.kind === 'allow_always')
-    if (!allow) {
-      this.emit({ kind: 'error', message: 'DSH permission request had no allow option' })
-      return { outcome: { outcome: 'cancelled' } }
+    const reject = options.find((option) => option.kind === 'reject_once') ?? options.find((option) => option.kind === 'reject_always')
+    const kind = params.toolCall?.kind ?? 'other'
+    const allowedKinds = new Set(['read', 'search', 'think', 'fetch'])
+    const permitted = this.options.permission !== 'read-only' || allowedKinds.has(kind)
+    if (permitted && allow) {
+      this.emit({ kind: 'status', message: `permission granted (${kind})` })
+      return { outcome: { outcome: 'selected', optionId: allow.optionId } }
     }
-    this.emit({ kind: 'status', message: 'permission granted' })
-    return { outcome: { outcome: 'selected', optionId: allow.optionId } }
+    if (!permitted && reject) {
+      this.emit({ kind: 'status', message: `permission denied by read-only (${kind})` })
+      return { outcome: { outcome: 'selected', optionId: reject.optionId } }
+    }
+    this.emit({ kind: 'error', message: `DSH permission request had no ${permitted ? 'allow' : 'reject'} option (${kind})` })
+    return { outcome: { outcome: 'cancelled' } }
   }
 
   private emit(event: ProjectedEvent): void {

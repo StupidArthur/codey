@@ -202,6 +202,36 @@ const budgetController = new LoopController(runtimeProgress, collectorProgress)
 const budgetResult = await budgetController.run(noProgressInput)
 check('loop_budget_exhausted', budgetResult.terminal.status === 'budget_exhausted' && progressCounter === DEFAULT_LOOP_BUDGET.maxContinuations + 1)
 
+// Wall-clock budget with an injected clock: the real 2h boundary is exercised
+// without waiting. A run reaching the boundary terminates as budget_exhausted
+// with the wall-clock reason; a run just below it must keep going.
+function progressCollector(counter) {
+  return {
+    baseline: async () => ({ git: false, files: new Set(), startedAt: 0 }),
+    collect: async () => ({ changedFiles: [`wall-${counter.n++}.ts`], newFiles: [], verification: [], outcome: 'completed' })
+  }
+}
+let atClock = 0
+const atCounter = { n: 0 }
+const atResult = await new LoopController(
+  { prompt: async () => { atClock = DEFAULT_LOOP_BUDGET.maxElapsedMs; return { text: 'still missing required item' } } },
+  progressCollector(atCounter),
+  DEFAULT_LOOP_BUDGET,
+  () => atClock
+).run(noProgressInput)
+check('loop_wall_clock_boundary', atResult.terminal.status === 'budget_exhausted' && atResult.terminal.reason.includes('2 hour') && atCounter.n === 1)
+
+let belowClock = 0
+let belowTurn = 0
+const belowCounter = { n: 0 }
+const belowResult = await new LoopController(
+  { prompt: async () => { belowTurn += 1; belowClock = belowTurn === 1 ? DEFAULT_LOOP_BUDGET.maxElapsedMs - 1 : DEFAULT_LOOP_BUDGET.maxElapsedMs; return { text: 'still missing required item' } } },
+  progressCollector(belowCounter),
+  DEFAULT_LOOP_BUDGET,
+  () => belowClock
+).run(noProgressInput)
+check('loop_wall_clock_just_below_then_cross', belowResult.terminal.status === 'budget_exhausted' && belowTurn === 2)
+
 const blocked = fakeLoop({ prompts: ['I am blocked and need your input to continue.'], bundles: [{ changedFiles: [], newFiles: [], verification: [], outcome: 'completed' }] })
 const blockedResult = await blocked.controller.run(noProgressInput)
 check('loop_blocked', blockedResult.terminal.status === 'blocked')

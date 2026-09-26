@@ -42,11 +42,13 @@ export class LoopController {
   constructor(
     private readonly runtime: DshRuntime,
     private readonly collector: EvidenceCollector,
-    private readonly budget: LoopBudget = DEFAULT_LOOP_BUDGET
+    private readonly budget: LoopBudget = DEFAULT_LOOP_BUDGET,
+    /** Wall-clock source; injectable so budget boundaries are testable without waiting. */
+    private readonly now: () => number = Date.now
   ) {}
 
   async run(input: LoopRunInput): Promise<LoopRunResult> {
-    const startedAt = Date.now()
+    const startedAt = this.now()
     const errorCounts = new Map<string, number>()
     let changedSoFar = new Set<string>()
     const accumulatedChanges = new Set<string>()
@@ -108,7 +110,7 @@ export class LoopController {
         }
       }
 
-      if (Date.now() - startedAt >= this.budget.maxElapsedMs) {
+      if (this.now() - startedAt >= this.budget.maxElapsedMs) {
         return this.finish('budget_exhausted', 'Loop reached the 2 hour wall-clock budget.', finalResponse, cumulative, continuations)
       }
       if (continuations >= this.budget.maxContinuations) {

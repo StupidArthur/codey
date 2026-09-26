@@ -129,13 +129,14 @@ function marker(prefix) {
 }
 
 /** Runs one submit through the real IPC and returns observed facts. */
-async function runScenario(mode, buildSpec, { finalize }) {
+async function runScenario(mode, buildSpec, { finalize, permission = 'workspace-write' }) {
   const workspace = await mkdtemp(join(tmpdir(), `temporal-app-${mode}-`))
   const tag = marker(`ARK-${mode.toUpperCase()}`)
   const spec = buildSpec(tag)
 
   const opened = await evaluate(`window.temporal.openSession(${JSON.stringify(workspace)})`)
-  await evaluate(`window.temporal.setPermission('workspace-write')`)
+  await evaluate(`window.temporal.setPermission(${JSON.stringify(permission)})`)
+  const appliedPermission = (await evaluate('window.temporal.getSnapshot()')).permission
 
   // Fire the submit without awaiting it so live runner events can be observed.
   await evaluate(
@@ -172,6 +173,7 @@ async function runScenario(mode, buildSpec, { finalize }) {
   return {
     workspaceChars: workspace.length,
     sessionKind: opened.session?.kind,
+    sessionPermission: appliedPermission,
     sawRunning: seenKinds.size > 0,
     elapsedMs: Date.now() - startedAt,
     timedOut: Boolean(snapshot?.running),
@@ -179,6 +181,7 @@ async function runScenario(mode, buildSpec, { finalize }) {
     runnerEventKinds: [...seenKinds].sort(),
     errorFromSnapshot: Boolean(snapshot?.error),
     historyState: detail.historyState,
+    outputMentionsDenial: /read-?only|permission|denied|not allowed|cannot write|forbidden|只读|权限/i.test(round?.bodyMarkdown ?? ''),
     round: round
       ? {
           mode: round.mode,
@@ -215,7 +218,13 @@ const scenarios = {
     `Step 1: create a file named NOTES.md in the current workspace whose entire contents are exactly the single line: ${tag}`,
     'Step 2: verify the write by running this exact shell command: cmd /c echo test-verify && type NOTES.md',
     'If that verification succeeds, reply with exactly: done'
-  ].join(' '), { finalize: false })
+  ].join(' '), { finalize: false }),
+
+  readonly: () => runScenario('vibe', (tag) => [
+    'You must create a file named NOTES.md in the current workspace.',
+    `Its entire contents must be exactly the single line: ${tag}`,
+    'Do it now with your file-writing tool.'
+  ].join(' '), { finalize: true, permission: 'read-only' })
 }
 
 const passedChecks = []
@@ -245,6 +254,14 @@ try {
         result.round.result &&
         result.round.result.changes.some((change) => change.startsWith('NOTES.md')) &&
         result.workspaceFile.exists && result.workspaceFile.matchesMarker
+      ))
+    } else if (name === 'readonly') {
+      passedChecks.push(Boolean(
+        result.sessionPermission === 'read-only' &&
+        result.round &&
+        !result.workspaceFile.exists &&
+        result.round.result &&
+        !result.round.result.changes.some((change) => change.startsWith('NOTES.md'))
       ))
     } else {
       passedChecks.push(Boolean(
