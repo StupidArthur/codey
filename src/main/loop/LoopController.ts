@@ -2,8 +2,8 @@ import { randomBytes } from 'node:crypto'
 import type { ExecutionOutcome, LoopTerminalSummary, PermissionPreset, RunnerEvent } from '../../shared/contracts'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { DshRuntime } from '../dsh/DshRuntime'
-import { TURN_CANCELLED_MESSAGE, TURN_DEADLINE_MESSAGE } from '../dsh/DshRuntime'
+import type { AgentRuntime } from '../runtime/AgentRuntime'
+import { TURN_CANCELLED_MESSAGE, TURN_DEADLINE_MESSAGE } from '../runtime/AgentRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, FileStateMap, ToolCallFact, VerificationRequest, VerificationRun, VerificationExecutorFn, WorkspaceSnapshot } from '../evidence/evidence'
 import { VERIFY_DIR, inputFingerprint } from '../evidence/evidence'
@@ -84,7 +84,7 @@ export class LoopController {
   private readonly sandboxRequests = new Map<string, SandboxRequest>()
 
   constructor(
-    private readonly runtime: DshRuntime,
+    private readonly runtime: AgentRuntime,
     private readonly collector: EvidenceCollector,
     private readonly budget: LoopBudget = DEFAULT_LOOP_BUDGET,
     /** Wall-clock source; injectable so budget boundaries are testable without waiting. */
@@ -124,7 +124,7 @@ export class LoopController {
       failure = undefined
       let text = ''
       try {
-        text = (await this.runtime.prompt(prompt, { timeoutMs: Math.max(deadline - this.now(), 1_000) })).text
+        text = (await this.runtime.prompt(prompt, { timeoutMs: Math.max(deadline - this.now(), 1_000), agent: 'build' })).text
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error)
       }
@@ -146,7 +146,7 @@ export class LoopController {
         if (failure.includes(TURN_DEADLINE_MESSAGE)) {
           return this.finish(
             'budget_exhausted',
-            'Loop reached the wall-clock budget during a model turn; the turn was cancelled through the public session/cancel and the collected evidence is preserved.',
+            'Loop reached the wall-clock budget during a model turn; the turn was cancelled through the public the backend's public abort API and the collected evidence is preserved.',
             finalResponse, bundle, continuations, lastDecision
           )
         }
@@ -170,7 +170,7 @@ export class LoopController {
             throwIfCancelled(input)
             const reAskDeadline = Math.max(deadline - this.now(), 1_000)
             try {
-              const reAsk = await this.runtime.prompt(decisionReAskPrompt(parsed.error), { timeoutMs: reAskDeadline })
+              const reAsk = await this.runtime.prompt(decisionReAskPrompt(parsed.error), { timeoutMs: reAskDeadline, agent: 'build' })
               const reParsed = extractDecision(reAsk.text)
               if (reParsed.ok) {
                 modelDecision = reParsed.decision
@@ -322,7 +322,7 @@ export class LoopController {
 
         // Sandbox verification wrappers are product material: written by the
         // controller (workspace-write only) under request-specific nonce names,
-        // run by the model inside DSH's confined execution, verified by the
+        // run by the model inside the active agent backend's tool execution, verified by the
         // product's own executor against the same nonce artifacts. The exact
         // commands are appended to the next prompt so the model runs THIS
         // request's scripts, never a stale copy.
