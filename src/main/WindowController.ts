@@ -22,6 +22,7 @@ export class WindowController {
   private runtime: DshRuntime | null = null
   private lease: SessionLease | null = null
   private running = false
+  private cancelRequested = false
   private runnerEvents: RunnerEvent[] = []
   private pendingEvidenceEvents: RunnerEvent[] = []
   private error: string | undefined
@@ -42,6 +43,7 @@ export class WindowController {
       evidence: this.evidence,
       resultBuilder: this.resultBuilder,
       verify: (request) => this.verificationExecutor.run(request),
+      isCancellationRequested: () => this.cancelRequested,
       takeEvents: () => {
         const events = this.pendingEvidenceEvents
         this.pendingEvidenceEvents = []
@@ -171,6 +173,7 @@ export class WindowController {
     if (!settings.provider || !settings.model) throw new Error('请先配置模型 Provider 和 Model。')
 
     const submittedRevision = this.store.getDraftWithRevision(session.id).revision
+    this.cancelRequested = false
     this.running = true
     this.error = undefined
     this.runnerEvents = []
@@ -178,18 +181,33 @@ export class WindowController {
     await this.emitSnapshot()
 
     try {
-      await this.engine.submit({ session, mode, spec })
-      this.store.clearDraftIfRevision(session.id, submittedRevision)
+      const result = await this.engine.submit({ session, mode, spec })
+      if (result.outcome !== 'interrupted') this.store.clearDraftIfRevision(session.id, submittedRevision)
     } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error)
-      await this.closeRuntime()
-      throw error
+      if (!this.cancelRequested) {
+        this.error = error instanceof Error ? error.message : String(error)
+        await this.closeRuntime()
+        throw error
+      }
+      this.error = undefined
     } finally {
       this.running = false
+      this.cancelRequested = false
       this.runnerEvents = []
       this.pendingEvidenceEvents = []
       await this.emitSnapshot()
     }
+  }
+
+  async cancelRun(): Promise<boolean> {
+    this.assertOwnership()
+    if (!this.running) return false
+    if (this.cancelRequested) return true
+    this.cancelRequested = true
+    const runtime = this.runtime
+    if (runtime) await runtime.cancelTurn()
+    await this.emitSnapshot()
+    return true
   }
 
   async endRound(): Promise<void> {
