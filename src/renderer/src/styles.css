@@ -67,6 +67,17 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
   background:transparent;color:#696964;font-size:17px
 }
 .icon-button:hover:not(:disabled){background:#ecece8;color:#1e1e1c}
+.sidebar-toggle{padding:0}
+.sidebar-toggle-glyph{
+  position:relative;display:block;width:16px;height:14px;border:1.4px solid currentColor;border-radius:4px;opacity:.9
+}
+.sidebar-toggle-glyph::before{
+  content:"";position:absolute;left:4px;top:0;bottom:0;width:1px;background:currentColor;opacity:.72
+}
+.sidebar-toggle-glyph i{
+  position:absolute;left:1.5px;top:2px;width:1.5px;height:8px;border-radius:1px;background:currentColor;opacity:.18
+}
+.sidebar-toggle:hover .sidebar-toggle-glyph{opacity:1}
 .sidebar-name{display:grid;gap:2px;min-width:0}
 .sidebar-name strong{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#3c3c38}
 .sidebar-name small{font-size:9px;color:#969690;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -207,10 +218,10 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .runner-panel{
   position:absolute;inset:0;z-index:10;margin:0;border:0;border-radius:0;background:rgba(22,22,21,.985);color:#f1f1ee;
   box-shadow:none;display:flex;flex-direction:column;overflow:hidden;
-  opacity:0;transform:scale(.992);transform-origin:center;pointer-events:none;visibility:hidden;
-  transition:opacity .2s ease,transform .28s cubic-bezier(.22,1,.36,1),visibility .2s
+  opacity:0;transform:translate(-42%,42%) scale(.12);transform-origin:left bottom;pointer-events:none;visibility:hidden;
+  transition:opacity .18s ease,transform .38s cubic-bezier(.22,1,.36,1),visibility .38s
 }
-.runner-panel.open{opacity:1;transform:scale(1);pointer-events:auto;visibility:visible}
+.runner-panel.open{opacity:1;transform:translate(0,0) scale(1);pointer-events:auto;visibility:visible}
 .runner-panel.stopping{opacity:.9}
 .runner-header{height:42px;flex:none;display:flex;justify-content:space-between;align-items:center;padding:0 10px 0 14px;border-bottom:1px solid #30302d;background:#191918}
 .runner-header>div{display:flex;align-items:center;gap:8px;font-size:10px}.runner-header>div span:last-child{color:#9f9f99}
