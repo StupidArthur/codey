@@ -40,9 +40,10 @@ export interface DshRuntimeOptions {
 
 /**
  * One window's execution path for one DSH Session, driven entirely by the
- * public ACP transport. Full mode boots the shipped `acp` profile; minimal
- * mode boots the official `sdk-minimal` composition and replaces only its SDK
- * stdio surface with the official ACP bridge.
+ * public ACP transport. Full mode boots the shipped `acp` profile. Minimal uses
+ * the official `sdk-minimal` composition on POSIX; on Windows it keeps the ACP
+ * host but reduces the model surface to the same minimal persona plus one native
+ * one-shot pwsh tool, avoiding the persistent ConPTY path under Electron.
  *
  * The SDK `sdk` profile cannot resume a persisted session (its server always
  * calls `agents.create`; see docs/dsh-upstream-resume-report.md), so execution
@@ -78,7 +79,7 @@ export class DshRuntime {
     const provider = this.options.settings.provider.trim()
     const model = this.options.settings.model.trim()
     const composition = this.options.composition ?? 'full'
-    const profile = composition === 'minimal' ? 'sdk-minimal' : 'acp'
+    const profile = composition === 'minimal' && process.platform !== 'win32' ? 'sdk-minimal' : 'acp'
     this.debug('runtime.start.begin', { provider, model, composition, profile, workspacePath: this.options.workspacePath, resumeSessionId: sessionId })
     const baseUrl = this.options.settings.baseUrl?.trim()
     if (!provider || !model) throw new Error('Configure a model provider and model before starting DSH')
@@ -383,9 +384,10 @@ function runtimePatch(input: {
   composition: DshRuntimeComposition
   permission: PermissionPreset
 }): string {
-  return input.composition === 'minimal'
-    ? minimalAcpPatch(input)
-    : fullAcpPatch(input)
+  if (input.composition !== 'minimal') return fullAcpPatch(input)
+  return process.platform === 'win32'
+    ? minimalWindowsAcpPatch(input)
+    : minimalSdkAcpPatch(input)
 }
 
 function fullAcpPatch(input: {
@@ -414,7 +416,63 @@ function fullAcpPatch(input: {
   ].join('\n') + '\n'
 }
 
-function minimalAcpPatch(input: {
+function minimalWindowsAcpPatch(input: {
+  provider: string
+  model: string
+  baseUrl: string
+  official: boolean
+  permission: PermissionPreset
+}): string {
+  const lines = fullAcpPatch(input).trimEnd().split('\n')
+  lines.push(
+    '# Codey Vibe on Windows: DSH minimal model surface over the proven one-shot pwsh executor.',
+    '- id: system-prompt',
+    '  config:',
+    '    includeHarnessIdentity: false',
+    '    includeRuntimeContext: false',
+    `    personaPrefix: ${yamlScalar('You are a helpful software engineer assistant.')}`,
+    "    personaSuffix: ''",
+    '- id: sandbox-policy',
+    '  config:',
+    `    mode: ${yamlScalar(input.permission)}`,
+    '    workspaceRoot: !!js process.cwd()',
+    '- id: tool-pwsh',
+    '  config:',
+    '    enableRunInBackground: false',
+    '    promoteOnTimeout: false'
+  )
+
+  const disabled = [
+    'tool-bash',
+    'tool-jobs',
+    'tool-fs',
+    'tool-fs-search',
+    'skill-filesystem',
+    'tool-skill',
+    'command-goal',
+    'tool-goal',
+    'plan-mode',
+    'compaction-basic',
+    'command-compact',
+    'tool-result-pruner',
+    'image-offload',
+    'tool-subagent-control',
+    'tool-subagent-list-agents',
+    'tool-subagent',
+    'tool-subagent-fork',
+    'workflow-ptc',
+    'tool-workflow',
+    'tool-ralph',
+    'agent-instructions',
+    'tool-todo',
+    'tool-web',
+    'repeat-tool-reminder'
+  ]
+  for (const id of disabled) lines.push(`- id: ${id}`, '  disabled: true')
+  return lines.join('\n') + '\n'
+}
+
+function minimalSdkAcpPatch(input: {
   provider: string
   model: string
   baseUrl: string
