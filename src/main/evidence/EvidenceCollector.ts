@@ -15,6 +15,8 @@ const MAX_FILES = 200
 const MAX_WALK = 4_000
 /** Content hashes are computed for files up to this size (same-size/same-mtime detection). */
 const HASH_CAP_BYTES = 1_000_000
+const SNAPSHOT_IO_CONCURRENCY = 24
+const SKIP_DIR_NAMES = new Set(['node_modules', 'dist', 'build', 'out', 'release', 'coverage', 'target', '__pycache__', 'venv'])
 
 interface FileStamp {
   mtimeMs: number
@@ -226,8 +228,13 @@ async function git(workspacePath: string, args: string[]): Promise<string | null
 async function snapshotFiles(root: string): Promise<Map<string, FileStamp>> {
   const found = new Map<string, FileStamp>()
   const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }]
+  const candidates: Array<{ full: string; relativePath: string }> = []
   let visited = 0
-  while (queue.length > 0 && visited < MAX_WALK && found.size < MAX_FILES) {
+
+  // Enumerate first, then stat/hash in bounded parallel batches. Dependency
+  // and generated-output directories are not task inputs and can be enormous
+  // on Windows, so do not walk them at all.
+  while (queue.length > 0 && visited < MAX_WALK && candidates.length < MAX_FILES) {
     const { dir, depth } = queue.shift()!
     let entries
     try { entries = await readdir(dir, { withFileTypes: true }) } catch { continue }
@@ -236,10 +243,18 @@ async function snapshotFiles(root: string): Promise<Map<string, FileStamp>> {
       const full = join(dir, entry.name)
       visited += 1
       if (entry.isDirectory()) {
-        if (depth < 3) queue.push({ dir: full, depth: depth + 1 })
+        if (depth < 3 && !SKIP_DIR_NAMES.has(entry.name)) queue.push({ dir: full, depth: depth + 1 })
         continue
       }
       if (!entry.isFile()) continue
+      candidates.push({ full, relativePath: relative(root, full).replace(/\\/g, '/') })
+      if (candidates.length >= MAX_FILES || visited >= MAX_WALK) break
+    }
+  }
+
+  for (let offset = 0; offset < candidates.length; offset += SNAPSHOT_IO_CONCURRENCY) {
+    const batch = candidates.slice(offset, offset + SNAPSHOT_IO_CONCURRENCY)
+    const stamped = await Promise.all(batch.map(async ({ full, relativePath }) => {
       try {
         const info = await stat(full)
         const stamp: FileStamp = { mtimeMs: info.mtimeMs, size: info.size }
@@ -248,8 +263,13 @@ async function snapshotFiles(root: string): Promise<Map<string, FileStamp>> {
             stamp.hash = createHash('sha1').update(await readFile(full)).digest('hex')
           } catch { /* unreadable: fall back to mtime/size only */ }
         }
-        found.set(relative(root, full).replace(/\\/g, '/'), stamp)
-      } catch { /* ignore */ }
+        return { relativePath, stamp }
+      } catch {
+        return undefined
+      }
+    }))
+    for (const item of stamped) {
+      if (item) found.set(item.relativePath, item.stamp)
     }
   }
   return found
