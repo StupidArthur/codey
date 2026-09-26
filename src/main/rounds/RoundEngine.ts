@@ -93,7 +93,12 @@ export class RoundEngine {
     try {
       const runtime = await this.deps.ensureRuntime()
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
-      const result = await loop.run({ rootSpec: input.spec, workspacePath: input.session.workspacePath, takeEvents: this.deps.takeEvents })
+      const result = await loop.run({
+        rootSpec: input.spec,
+        workspacePath: input.session.workspacePath,
+        permission: input.session.permission,
+        takeEvents: this.deps.takeEvents
+      })
       this.saveEvidence(round.id, result.evidence)
       const document = this.deps.resultBuilder.build({
         finalResponse: result.finalResponse,
@@ -184,11 +189,14 @@ function bundleFromRecords(records: EvidenceSummary[]): EvidenceBundle {
       if (record.detail === 'created') newFiles.push(record.label)
     } else if (record.kind === 'command') {
       verification.push({
-        id: record.id, turn: record.turn ?? 1, label: record.label, command: record.command ?? record.label,
+        id: record.id, turn: record.turn ?? 1, label: record.label,
+        method: record.command?.startsWith('builtin:') ? 'builtin' : 'shell',
+        command: record.command ?? record.label,
         exitCode: record.exitCode ?? null, signal: null, outputTail: record.detail,
         scope: record.targets && record.targets.length > 0 ? 'file' : 'workspace',
-        targets: record.targets ?? [], covers: record.covers ?? [], stamps: new Map(),
-        outcome: record.outcome === 'observed' ? 'observed' : record.outcome,
+        targets: record.targets ?? [], facts: record.facts ?? [], stamps: new Map(),
+        outcome: record.denial ? 'denied' : record.outcome === 'observed' ? 'observed' : record.outcome,
+        ...(record.denial ? { denial: record.denial } : {}),
         at: record.observedAt
       })
     }

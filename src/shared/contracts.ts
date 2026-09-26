@@ -62,6 +62,18 @@ export interface VibeEntrySummary {
   createdAt: string
 }
 
+/**
+ * What a verification check factually verified, recorded by the product's own
+ * executor. Facts describe what was actually checked and what was observed —
+ * they never claim which requirement they satisfy; that assessment is a
+ * separate, programmatic step in the evaluator.
+ */
+export type CheckFact =
+  | { kind: 'file-exists'; target: string; isFile: boolean; matched: boolean }
+  | { kind: 'content-equals'; target: string; expectedHash: string; actualHash: string | null; matched: boolean }
+  | { kind: 'field-equals'; target: string; key: string; expected: string; actual: string | null; matched: boolean }
+  | { kind: 'command-exit'; command: string; exitCode: number | null; matched: boolean }
+
 export interface EvidenceSummary {
   id: string
   kind: 'command' | 'workspace' | 'artifact' | 'manual' | 'runtime'
@@ -75,7 +87,11 @@ export interface EvidenceSummary {
   exitCode?: number | null
   /** Files the check verified (relative); empty means workspace-scoped. */
   targets?: string[]
-  /** Required-spec item ids this evidence covers. */
+  /** What the check factually verified (recorded by the executor, not the requester). */
+  facts?: CheckFact[]
+  /** Present when the executor refused to run the check (permission boundary). */
+  denial?: string
+  /** Deprecated: generator-written coverage claims; kept only for old rows. */
   covers?: string[]
   /** False once a target changed or the artifact disappeared after the run. */
   valid?: boolean
@@ -93,6 +109,11 @@ export interface RequirementCoverageSummary {
   original: string
   status: 'satisfied' | 'pending' | 'unknown'
   evidenceIds: string[]
+  /** The objective acceptance conditions parsed from the requirement. */
+  conditions?: string[]
+  /** Which conditions are not yet covered, when the item is not satisfied. */
+  uncovered?: string[]
+  note?: string
 }
 
 export interface ResultSummary {

@@ -186,7 +186,7 @@ function emptyBundle(extra = {}) {
   return { changedFiles: [], turnChangedFiles: [], newFiles: [], preexistingChanges: [], toolFacts: [], verification: [], outcome: 'completed', ...extra }
 }
 
-const noProgressInput = { rootSpec: 'do something', workspacePath: root, takeEvents: () => [] }
+const noProgressInput = { rootSpec: 'do something', workspacePath: root, permission: 'workspace-write', takeEvents: () => [] }
 const noProgress = fakeLoop({ prompts: ['still working'], bundles: [emptyBundle()] })
 const noProgressResult = await noProgress.controller.run(noProgressInput)
 check('loop_no_progress_fails', noProgressResult.terminal.status === 'failed' && noProgressResult.terminal.reason.includes('No progress'))
@@ -251,6 +251,8 @@ check('loop_blocked', blockedResult.terminal.status === 'blocked')
 
 // Positive path: completion only through the real collector, the real
 // verification executor and the evaluator gate — never through a model claim.
+// The requirement carries real acceptance semantics (file exists AND content
+// matches); a bare empty file cannot satisfy it.
 const gateRoot = await mkdtemp(join(tmpdir(), 'temporal-gate-'))
 const gateRuntime = {
   prompt: async () => {
@@ -261,10 +263,12 @@ const gateRuntime = {
 }
 const gateEvidence = new EvidenceCollector()
 const gateController = new LoopController(gateRuntime, gateEvidence, DEFAULT_LOOP_BUDGET, Date.now, new VerificationExecutor().run)
-const gateSpec = 'Create a file src/answer.txt.\nRun: type src\\answer.txt'
-const gateResult = await gateController.run({ rootSpec: gateSpec, workspacePath: gateRoot, takeEvents: () => [] })
-check('loop_completes_with_valid_evidence', gateResult.terminal.status === 'completed' && gateResult.terminal.reason.includes('req-1') && gateResult.terminal.reason.includes('req-2'))
-check('loop_completed_evidence_has_exit_codes', gateResult.evidence.verification.some((run) => run.outcome === 'passed' && run.exitCode === 0))
+const gateSpec = 'Create a file src/answer.txt whose contents are exactly: verify'
+const gateResult = await gateController.run({ rootSpec: gateSpec, workspacePath: gateRoot, permission: 'workspace-write', takeEvents: () => [] })
+check('loop_completes_with_valid_evidence', gateResult.terminal.status === 'completed' && gateResult.terminal.reason.includes('req-1'))
+check('loop_completed_evidence_is_builtin_content_fact', gateResult.evidence.verification.some(
+  (run) => run.outcome === 'passed' && run.method === 'builtin' && run.facts.some((fact) => fact.kind === 'content-equals' && fact.matched)
+))
 
 // ---------------------------------------------------------------------------
 // RoundEngine: Plan reuse/versioning, Plan→Vibe finalize, Vibe accumulation,
@@ -316,15 +320,16 @@ check('vibe_finalize_builds_result', rounds[1].status === 'completed' && Boolean
 
 verification = true
 // The loop round must complete through the real gate: the model writes the
-// next artifact and the product's verification executor checks it.
+// next artifact with the required content and the product's verification
+// executor confirms content through the built-in read-only check.
 const loopTarget = `artifact-${fileCounter + 1}.txt`
-await engine.submit({ session: projectSession, mode: 'loop', spec: `Create a file ${loopTarget}.\nRun: type ${loopTarget}` })
+await engine.submit({ session: projectSession, mode: 'loop', spec: `Create a file ${loopTarget} whose contents are exactly: x` })
 rounds = engineSession.listRounds(projectSession.id)
 const loopRound = rounds[2]
 const loopResult = engineSession.getResult(loopRound.id)
 check('loop_creates_new_terminal_round', rounds.length === 3 && loopRound.mode === 'loop' && loopRound.status === 'completed')
 check('loop_result_terminal', loopResult?.loopTerminal?.status === 'completed')
-check('loop_result_requirement_coverage', Array.isArray(loopResult?.coverage) && loopResult.coverage.length >= 2 && loopResult.coverage.every((item) => item.status === 'satisfied'))
+check('loop_result_requirement_coverage', Array.isArray(loopResult?.coverage) && loopResult.coverage.length >= 1 && loopResult.coverage.every((item) => item.status === 'satisfied'))
 check('evidence_persisted', engineSession.listEvidence(loopRound.id).some((record) => record.kind === 'workspace'))
 engineSession.close()
 

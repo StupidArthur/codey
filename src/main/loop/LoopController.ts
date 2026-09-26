@@ -1,7 +1,8 @@
-import type { ExecutionOutcome, LoopTerminalSummary, RunnerEvent } from '../../shared/contracts'
+import type { ExecutionOutcome, LoopTerminalSummary, PermissionPreset, RunnerEvent } from '../../shared/contracts'
 import type { DshRuntime } from '../dsh/DshRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, ToolCallFact, VerificationRequest, VerificationRun, VerificationExecutorFn } from '../evidence/evidence'
+import { describeMethod } from '../evidence/VerificationExecutor'
 import { LoopEvaluator, type CheckRequest, type LoopDecision, type WorkspaceHints } from './LoopEvaluator'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -24,6 +25,8 @@ export const DEFAULT_LOOP_BUDGET: LoopBudget = {
 export interface LoopRunInput {
   rootSpec: string
   workspacePath: string
+  /** Session permission preset the verification executor must obey. */
+  permission: PermissionPreset
   takeEvents: () => RunnerEvent[]
 }
 
@@ -115,13 +118,14 @@ export class LoopController {
         if (this.verify && decision.nextChecks.length > 0) {
           for (const request of decision.nextChecks) {
             try {
-              newRuns.push(await this.verify(this.withCwd(request, input.workspacePath, turn)))
+              newRuns.push(await this.verify(this.withCwd(request, input, turn)))
             } catch (error) {
               newRuns.push({
                 id: `verr-${newRuns.length}-${turn}`,
-                turn, label: request.label, command: [request.command, ...request.args].join(' '),
+                turn, label: request.label, method: request.method.kind === 'shell' ? 'shell' : 'builtin',
+                command: describeMethod(request.method),
                 exitCode: null, signal: null, outputTail: String((error as Error)?.message ?? error).slice(0, 300),
-                scope: request.scope, targets: request.targets, covers: request.covers, stamps: new Map(),
+                scope: request.scope, targets: request.targets, facts: [], stamps: new Map(),
                 outcome: 'observed', at: new Date().toISOString()
               })
             }
@@ -157,8 +161,13 @@ export class LoopController {
     }
   }
 
-  private withCwd(request: CheckRequest, cwd: string, turn: number): VerificationRequest {
-    return { ...request, cwd, turn }
+  private withCwd(request: CheckRequest, input: LoopRunInput, turn: number): VerificationRequest {
+    return {
+      ...request,
+      cwd: input.workspacePath,
+      turn,
+      permission: { preset: input.permission, workspacePath: input.workspacePath }
+    }
   }
 
   private finish(

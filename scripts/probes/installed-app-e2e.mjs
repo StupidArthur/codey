@@ -7,11 +7,16 @@
  * real turn against the configured model → wait for it to settle → read the
  * persisted projection and the deterministic Result document.
  *
- * Two scenarios run in sequence:
+ * Three scenarios run in sequence:
  *   - vibe: a single turn that must create a workspace file, then ended
  *     explicitly so the Vibe Result is persisted;
- *   - loop: an evidence-gated loop that may only complete once a verification
- *     runner event passed.
+ *   - loop: an evidence-gated loop that may only complete once the product's
+ *     verification executor confirms the required content (built-in check);
+ *   - loopNegative: one satisfiable requirement plus one the model must leave
+ *     unmet — the Round must NOT complete and the Result must show the item;
+ *   - loopVerifyWrite: a read-only session whose Spec asks the verification
+ *     executor to write a file — the executor refuses and records the denial;
+ *   - readonly: a vibe turn in which the model cannot write at all.
  *
  *   TEMPORAL_TEST_API_KEY=... TEMPORAL_TEST_BASE_URL=... \
  *   TEMPORAL_TEST_PROVIDER=volc-ark TEMPORAL_TEST_MODEL=deepseek-v4-flash \
@@ -129,7 +134,8 @@ function marker(prefix) {
 }
 
 /** Runs one submit through the real IPC and returns observed facts. */
-async function runScenario(mode, buildSpec, { finalize, permission = 'workspace-write' }) {
+async function runScenario(mode, buildSpec, options = {}) {
+  const { finalize, permission = 'workspace-write' } = options
   const workspace = await mkdtemp(join(tmpdir(), `temporal-app-${mode}-`))
   const tag = marker(`ARK-${mode.toUpperCase()}`)
   const spec = buildSpec(tag)
@@ -169,7 +175,13 @@ async function runScenario(mode, buildSpec, { finalize, permission = 'workspace-
   } catch {
     workspaceFile = { exists: false, matchesMarker: false }
   }
+  let forbiddenFile
+  if (options.forbiddenFile) {
+    forbiddenFile = await stat(join(workspace, options.forbiddenFile)).then(() => ({ exists: true })).catch(() => ({ exists: false }))
+  }
 
+  const resultDoc = round?.result ?? null
+  const remainingText = (resultDoc?.remaining ?? []).join(' ')
   return {
     workspaceChars: workspace.length,
     sessionKind: opened.session?.kind,
@@ -192,17 +204,22 @@ async function runScenario(mode, buildSpec, { finalize, permission = 'workspace-
           evidenceKinds: [...new Set(round.evidence.map((e) => e.kind))].sort(),
           evidenceProvenance: [...new Set(round.evidence.map((e) => e.provenance))].sort(),
           notesEvidence: round.evidence.some((e) => e.kind === 'workspace' && e.label.includes('NOTES.md')),
-          result: round.result
+          contentMatchPassedEvidence: round.evidence.some((e) => e.kind === 'command' && typeof e.detail === 'string' && e.detail.includes('content match')),
+          deniedVerificationEvidence: round.evidence.some((e) => e.kind === 'command' && typeof e.detail === 'string' && e.detail.includes('denied')),
+          result: resultDoc
             ? {
-                verificationCount: round.result.verification.length,
-                changes: round.result.changes,
-                remainingCount: round.result.remaining.length,
-                loopTerminal: round.result.loopTerminal ?? null
+                verificationCount: resultDoc.verification.length,
+                changes: resultDoc.changes,
+                remainingCount: resultDoc.remaining.length,
+                remainingMentionsForbiddenFile: options.forbiddenFile ? remainingText.includes(options.forbiddenFile) : false,
+                remainingMentionsDenied: remainingText.includes('denied'),
+                loopTerminal: resultDoc.loopTerminal ?? null
               }
             : null
         }
       : null,
-    workspaceFile
+    workspaceFile,
+    ...(options.forbiddenFile ? { forbiddenFile } : {})
   }
 }
 
@@ -214,9 +231,25 @@ const scenarios = {
   ].join(' '), { finalize: true }),
 
   loop: () => runScenario('loop', (tag) => [
-    'Create a file named NOTES.md in the current workspace whose entire contents are exactly the single line: ' + tag,
-    `Run: findstr /c:"${tag}" NOTES.md`
+    'Create a file named NOTES.md in the current workspace whose entire contents are exactly the single line: ' + tag
   ].join('\n'), { finalize: false }),
+
+  // A requirement the model must NOT satisfy (it is told to leave the file
+  // missing) next to one it can satisfy: the Round must NOT complete even
+  // though the NOTES.md content check passes, and the Result must show the
+  // unmet item.
+  loopNegative: () => runScenario('loop', (tag) => [
+    'Create a file named NOTES.md in the current workspace whose entire contents are exactly the single line: ' + tag,
+    'The file sealed.md must also exist. However, you must not create, write, or touch sealed.md in this session: it is owned by an external process that never runs, and it intentionally stays missing for this scenario.'
+  ].join('\n'), { finalize: false, forbiddenFile: 'sealed.md' }),
+
+  // Read-only session with a Spec whose acceptance line asks the verification
+  // executor to WRITE a file: the executor must refuse (fail closed), record
+  // the denial with its real reason, and nothing may appear on disk.
+  loopVerifyWrite: () => runScenario('loop', (tag) => [
+    'Create a file named verify-write.md in the current workspace whose entire contents are exactly the single line: ' + tag,
+    'Run: echo pwned > verify-write.md'
+  ].join('\n'), { finalize: false, permission: 'read-only', forbiddenFile: 'verify-write.md' }),
 
   readonly: () => runScenario('vibe', (tag) => [
     'You must create a file named NOTES.md in the current workspace.',
@@ -261,6 +294,35 @@ try {
         result.round.result &&
         !result.round.result.changes.some((change) => change.startsWith('NOTES.md'))
       ))
+    } else if (name === 'loopNegative') {
+      // The satisfiable requirement passed its real content check, the
+      // forbidden one stays unmet: the Round must NOT complete and the Result
+      // must name the unmet artifact in Remaining.
+      passedChecks.push(Boolean(
+        result.round &&
+        result.round.contentMatchPassedEvidence &&
+        result.round.result &&
+        result.round.result.loopTerminal &&
+        result.round.result.loopTerminal.status !== 'completed' &&
+        result.round.result.remainingCount > 0 &&
+        result.round.result.remainingMentionsForbiddenFile &&
+        result.workspaceFile.exists && result.workspaceFile.matchesMarker &&
+        result.forbiddenFile && !result.forbiddenFile.exists
+      ))
+    } else if (name === 'loopVerifyWrite') {
+      // The verification executor refused the Run: write attempt (fail closed
+      // under read-only), recorded the denial, and nothing was written.
+      passedChecks.push(Boolean(
+        result.sessionPermission === 'read-only' &&
+        result.round &&
+        result.round.deniedVerificationEvidence &&
+        result.round.result &&
+        result.round.result.loopTerminal &&
+        result.round.result.loopTerminal.status !== 'completed' &&
+        result.round.result.remainingMentionsDenied &&
+        !result.workspaceFile.exists &&
+        result.forbiddenFile && !result.forbiddenFile.exists
+      ))
     } else {
       // A Loop Round must actually COMPLETE through the product verification
       // executor — a Round that merely ended (blocked/budget/failed) is an
@@ -283,6 +345,8 @@ try {
   socket.close()
 }
 
-report.passed = passedChecks.length > 0 && passedChecks.every(Boolean)
+const expectedScenarios = scenarioFilter === 'all' ? Object.keys(scenarios) : [scenarioFilter]
+const allScenariosRan = expectedScenarios.every((name) => report.scenarios[name])
+report.passed = allScenariosRan && passedChecks.length >= expectedScenarios.length + 1 && passedChecks.every(Boolean)
 console.log(JSON.stringify(report, null, 2))
 process.exitCode = report.passed ? 0 : 1

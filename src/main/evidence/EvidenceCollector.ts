@@ -1,21 +1,24 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { randomUUID } from 'node:crypto'
-import { readdir, stat } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import type { EvidenceSummary, ExecutionOutcome, RunnerEvent } from '../../shared/contracts'
 import type {
-  CollectResult, EvidenceBundle, FileState, FileStateMap, ToolCallFact, WorkspaceSnapshot
+  CollectResult, EvidenceBundle, FileState, FileStateMap, ToolCallFact, VerificationRun, WorkspaceSnapshot
 } from './evidence'
 
 const run = promisify(execFile)
 const MAX_DIFF = 4_000
 const MAX_FILES = 200
 const MAX_WALK = 4_000
+/** Content hashes are computed for files up to this size (same-size/same-mtime detection). */
+const HASH_CAP_BYTES = 1_000_000
 
 interface FileStamp {
   mtimeMs: number
   size: number
+  hash?: string
 }
 
 /**
@@ -115,16 +118,37 @@ export class EvidenceCollector {
     }
     for (const run of bundle.verification) {
       records.push({
-        id: run.id, kind: 'command', label: run.label, detail: runDetail(run), outcome: run.outcome,
+        id: run.id, kind: 'command', label: run.label, detail: runDetail(run),
+        // The DB outcome domain is passed/failed/observed; a denial is stored
+        // as observed plus its structured reason and reconstructed on read.
+        outcome: run.outcome === 'denied' ? 'observed' : run.outcome,
         provenance: 'tool', observedAt: run.at, command: run.command, exitCode: run.exitCode,
-        targets: run.targets, covers: run.covers, turn: run.turn
+        targets: run.targets, facts: run.facts,
+        ...(run.denial ? { denial: run.denial } : {}),
+        turn: run.turn
       })
     }
     return records
   }
 }
 
-function runDetail(run: { command: string; exitCode: number | null; outputTail: string }): string {
+function runDetail(run: VerificationRun): string {
+  if (run.outcome === 'denied') return `denied — ${run.denial ?? 'executor refused the check'}`
+  if (run.method === 'builtin') {
+    const fact = run.facts[0]
+    if (fact?.kind === 'file-exists') return fact.matched ? 'file exists' : fact.isFile ? 'missing' : 'path exists but is not a regular file'
+    if (fact?.kind === 'content-equals') {
+      return fact.matched
+        ? `content match (sha1 ${fact.actualHash})`
+        : `content mismatch (expected sha1 ${fact.expectedHash}, actual ${fact.actualHash ?? 'n/a'})`
+    }
+    if (fact?.kind === 'field-equals') {
+      return fact.matched
+        ? `field '${fact.key}' = '${fact.expected}'`
+        : `field '${fact.key}' is ${fact.actual === null ? 'missing' : `'${fact.actual}'`}, expected '${fact.expected}'`
+    }
+    return run.outputTail || 'builtin check'
+  }
   const tail = run.outputTail ? ` — ${run.outputTail}` : ''
   return `exit ${run.exitCode === null ? 'n/a' : run.exitCode}${tail}`
 }
@@ -172,7 +196,13 @@ async function snapshotFiles(root: string): Promise<Map<string, FileStamp>> {
       if (!entry.isFile()) continue
       try {
         const info = await stat(full)
-        found.set(relative(root, full).replace(/\\/g, '/'), { mtimeMs: info.mtimeMs, size: info.size })
+        const stamp: FileStamp = { mtimeMs: info.mtimeMs, size: info.size }
+        if (info.size <= HASH_CAP_BYTES) {
+          try {
+            stamp.hash = createHash('sha1').update(await readFile(full)).digest('hex')
+          } catch { /* unreadable: fall back to mtime/size only */ }
+        }
+        found.set(relative(root, full).replace(/\\/g, '/'), stamp)
       } catch { /* ignore */ }
     }
   }
@@ -184,7 +214,8 @@ function changedSinceFiles(before: Map<string, FileStamp>, after: Map<string, Fi
   const changed: string[] = []
   for (const [file, stamp] of after) {
     const prev = before.get(file)
-    if (prev === undefined || prev.mtimeMs !== stamp.mtimeMs || prev.size !== stamp.size) changed.push(file)
+    const contentChanged = prev?.hash !== undefined && stamp.hash !== undefined && prev.hash !== stamp.hash
+    if (prev === undefined || prev.mtimeMs !== stamp.mtimeMs || prev.size !== stamp.size || contentChanged) changed.push(file)
   }
   for (const file of before.keys()) {
     if (!after.has(file)) changed.push(file)
@@ -194,7 +225,9 @@ function changedSinceFiles(before: Map<string, FileStamp>, after: Map<string, Fi
 
 function toFileStates(files: Map<string, FileStamp>, baseline: Map<string, FileStamp> | null): FileStateMap {
   const states: FileStateMap = new Map()
-  for (const [file, stamp] of files) states.set(file, { exists: true, mtimeMs: stamp.mtimeMs, size: stamp.size })
+  for (const [file, stamp] of files) {
+    states.set(file, { exists: true, mtimeMs: stamp.mtimeMs, size: stamp.size, ...(stamp.hash ? { hash: stamp.hash } : {}) })
+  }
   if (baseline) {
     for (const file of baseline.keys()) {
       if (!states.has(file)) states.set(file, { exists: false, mtimeMs: 0, size: 0 })

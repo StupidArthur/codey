@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync, type StatementSync } from 'node:sqlite'
-import type { ModelSettings, RoundDetail, RoundMode, RoundSummary, SessionSummary } from '../../shared/contracts'
+import type { CheckFact, ModelSettings, RoundDetail, RoundMode, RoundSummary, SessionSummary } from '../../shared/contracts'
 
 type SessionRow = {
   id: string
@@ -54,6 +54,10 @@ export interface EvidenceRecord {
   command?: string
   exitCode?: number | null
   targets?: string[]
+  /** What the check factually verified (recorded by the executor). */
+  facts?: CheckFact[]
+  /** Present when the executor refused to run the check. */
+  denial?: string
   covers?: string[]
   valid?: boolean
   turn?: number
@@ -193,6 +197,10 @@ const migrations = [
     ALTER TABLE round_evidence ADD COLUMN valid INTEGER;
     ALTER TABLE round_evidence ADD COLUMN turn INTEGER;
     ALTER TABLE round_evidence ADD COLUMN tool_call_id TEXT;
+  `,
+  `
+    ALTER TABLE round_evidence ADD COLUMN facts TEXT;
+    ALTER TABLE round_evidence ADD COLUMN denial TEXT;
   `
 ] as const
 
@@ -501,30 +509,32 @@ export class ProductStore {
 
   saveEvidence(roundId: string, evidence: EvidenceRecord): void {
     this.stmt(`
-      INSERT INTO round_evidence(id, round_id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO round_evidence(id, round_id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id, facts, denial)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET round_id = excluded.round_id, label = excluded.label,
         detail = excluded.detail, outcome = excluded.outcome, provenance = excluded.provenance,
         observed_at = excluded.observed_at, command = excluded.command, exit_code = excluded.exit_code,
         targets = excluded.targets, covers = excluded.covers, valid = excluded.valid,
-        turn = excluded.turn, tool_call_id = excluded.tool_call_id
+        turn = excluded.turn, tool_call_id = excluded.tool_call_id, facts = excluded.facts, denial = excluded.denial
     `).run(evidence.id, roundId, evidence.kind, evidence.label, evidence.detail,
       evidence.outcome, evidence.provenance, evidence.observedAt,
       evidence.command ?? null, evidence.exitCode ?? null,
       evidence.targets ? JSON.stringify(evidence.targets) : null,
       evidence.covers ? JSON.stringify(evidence.covers) : null,
       evidence.valid === undefined ? null : (evidence.valid ? 1 : 0),
-      evidence.turn ?? null, evidence.toolCallId ?? null)
+      evidence.turn ?? null, evidence.toolCallId ?? null,
+      evidence.facts ? JSON.stringify(evidence.facts) : null,
+      evidence.denial ?? null)
   }
 
   listEvidence(roundId: string): EvidenceRecord[] {
     const rows = this.stmt(`
-      SELECT id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id
+      SELECT id, kind, label, detail, outcome, provenance, observed_at, command, exit_code, targets, covers, valid, turn, tool_call_id, facts, denial
       FROM round_evidence WHERE round_id = ? ORDER BY observed_at, id
     `).all(roundId) as Array<{ id: string; kind: EvidenceRecord['kind']; label: string; detail: string;
       outcome: EvidenceRecord['outcome']; provenance: EvidenceRecord['provenance']; observed_at: string;
       command: string | null; exit_code: number | null; targets: string | null; covers: string | null;
-      valid: number | null; turn: number | null; tool_call_id: string | null }>
+      valid: number | null; turn: number | null; tool_call_id: string | null; facts: string | null; denial: string | null }>
     return rows.map((row) => {
       const record: EvidenceRecord = {
         id: row.id, kind: row.kind, label: row.label,
@@ -535,6 +545,8 @@ export class ProductStore {
       if (row.exit_code !== null) record.exitCode = row.exit_code
       if (row.targets !== null) record.targets = JSON.parse(row.targets) as string[]
       if (row.covers !== null) record.covers = JSON.parse(row.covers) as string[]
+      if (row.facts !== null) record.facts = JSON.parse(row.facts) as CheckFact[]
+      if (row.denial !== null) record.denial = row.denial
       if (row.valid !== null) record.valid = row.valid === 1
       if (row.turn !== null) record.turn = row.turn
       if (row.tool_call_id !== null) record.toolCallId = row.tool_call_id

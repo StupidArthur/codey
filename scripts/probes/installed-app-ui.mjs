@@ -250,17 +250,22 @@ try {
 
   // --- 7. Loop A: a real, verifiable task must COMPLETE through the product's
   // verification executor. A Round ending is not the success criterion: the
-  // workspace artifact must exist on disk and the Result must show real
-  // verification evidence with an exit code. ---
+  // workspace artifact must exist on disk and the Result must show the real
+  // content-match evidence from the built-in (read-only) check. ---
   report.loopA = {}
-  report.loopA.run = await runTurn('Create a file named ui-answer.txt whose contents are exactly the single line: ok.\nRun: type ui-answer.txt', 'loop')
+  // Use a punctuation-free random marker (same pattern as installed-app-e2e):
+  // a spec line ending in "ok." would be written back literally as "ok." by
+  // the model while the extracted expected value is "ok", so the content check
+  // could never pass and the loop would churn on rewrites until the budget.
+  const uiTag = 'UIOK' + Math.random().toString(16).slice(2, 10)
+  report.loopA.run = await runTurn(`Create a file named ui-answer.txt whose contents are exactly the single line: ${uiTag}`, 'loop')
   report.loopA.artifactOnDisk = await stat(join(workspace, 'ui-answer.txt')).then(() => true).catch(() => false)
   report.loopA.loopTerminalClass = await evaluate('document.querySelector(".loop-terminal")?.className ?? ""')
   report.loopA.terminalText = await evaluate('document.querySelector(".loop-terminal")?.innerText ?? ""')
   report.loopA.verificationLines = await evaluate(`(() => { const section = [...document.querySelectorAll(".result-block .result-section")].find(s => s.querySelector("h3")?.textContent === "Verification"); return section ? [...section.querySelectorAll("li")].map(li => li.textContent) : [] })()`)
   report.loopA.remainingLines = await evaluate('[...document.querySelectorAll(".result-block .result-section.remaining li")].map(li => li.textContent)')
   report.loopA.completed = report.loopA.loopTerminalClass.includes('loop-completed')
-  report.loopA.hasExitZeroVerification = report.loopA.verificationLines.some((line) => line.includes('exit 0'))
+  report.loopA.hasContentMatchVerification = report.loopA.verificationLines.some((line) => line.includes('content match'))
   report.loopA.timelineCount = await evaluate('document.querySelectorAll(".timeline-item").length')
   await shot('10-loop-a-result')
 
@@ -292,7 +297,7 @@ try {
     report.runner.openSeen && report.runner.miniShown && report.runner.collapsedClass &&
     report.runner.miniAccessibleWhenCollapsed && report.runner.restored &&
     report.vibe.resultRendered &&
-    report.loopA.completed && report.loopA.artifactOnDisk && report.loopA.hasExitZeroVerification &&
+    report.loopA.completed && report.loopA.artifactOnDisk && report.loopA.hasContentMatchVerification &&
     report.loopB.notReportedCompleted &&
     report.roundSwitch.firstSelected
   )
