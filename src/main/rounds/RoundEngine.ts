@@ -62,6 +62,7 @@ export class RoundEngine {
       const runtime = await this.deps.ensureRuntime()
       throwIfCancelled(this.deps.isCancellationRequested)
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
+      throwIfCancelled(this.deps.isCancellationRequested)
       // Plan turns carry product-owned guidance on the SAME DSH session; the
       // stored plan version keeps the user's original spec verbatim.
       const prompt = mode === 'plan' ? planGuidance(input.spec) : input.spec
