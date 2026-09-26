@@ -16,6 +16,7 @@ import { windowsConsolePreloadSource } from './WindowsRuntimeHost'
  *  period when even that did not settle). Consumers must treat this as a
  *  deadline termination, not a generic runtime error. */
 export const TURN_DEADLINE_MESSAGE = 'DSH turn deadline exceeded (cancelled via session/cancel)'
+export const TURN_CANCELLED_MESSAGE = 'DSH turn cancelled by user'
 const TURN_CANCEL_GRACE_MS = 8_000
 
 export interface DshRuntimeOptions {
@@ -47,6 +48,7 @@ export class DshRuntime {
   private connection?: ClientConnection
   private sessionId?: string
   private busy = false
+  private cancelRequested = false
   private closed = false
   private projector?: TurnProjector
   private turnToolFacts: ToolCallFact[] = []
@@ -152,6 +154,7 @@ export class DshRuntime {
     if (!sessionId || !connection) throw new Error('Start the DSH runtime before submitting a Spec')
 
     this.busy = true
+    this.cancelRequested = false
     const projector = new TurnProjector()
     this.projector = projector
     this.turnToolFacts = []
@@ -185,11 +188,16 @@ export class DshRuntime {
         // here after the grace period. Both are deadline terminations.
         throw new Error(TURN_DEADLINE_MESSAGE)
       }
+      if (this.cancelRequested) throw new Error(TURN_CANCELLED_MESSAGE)
       return { text: projector.assistantText }
     } catch (error) {
       if (deadlineHit) {
         this.emit({ kind: 'error', message: TURN_DEADLINE_MESSAGE })
         throw new Error(TURN_DEADLINE_MESSAGE)
+      }
+      if (this.cancelRequested || messageOf(error) === TURN_CANCELLED_MESSAGE) {
+        this.emit({ kind: 'status', message: 'run cancelled by user' })
+        throw new Error(TURN_CANCELLED_MESSAGE)
       }
       this.emit({ kind: 'error', message: messageOf(error) })
       throw error
@@ -201,6 +209,7 @@ export class DshRuntime {
       this.turnToolFacts = projector.drainToolFacts()
       this.projector = undefined
       this.busy = false
+      this.cancelRequested = false
     }
   }
 
@@ -210,11 +219,13 @@ export class DshRuntime {
   async cancelTurn(): Promise<boolean> {
     const connection = this.connection
     const sessionId = this.sessionId
-    if (!connection || !sessionId || this.closed) return false
+    if (!connection || !sessionId || this.closed || !this.busy) return false
+    this.cancelRequested = true
     try {
       await connection.agent.notify('session/cancel', { sessionId })
       return true
     } catch {
+      this.cancelRequested = false
       return false
     }
   }
