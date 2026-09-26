@@ -181,7 +181,7 @@ function runDetail(run: VerificationRun): string {
   // (and the input snapshot it was requested against) — it did not directly
   // capture a child-process exit. The source is stated as such, never as a
   // directly-observed process exit.
-  const source = run.requestId ? 'DSH 沙盒检查报告；产品核实结果产物及输入快照 — ' : ''
+  const source = run.requestId ? '模型执行检查报告；产品核实结果产物及输入快照 — ' : ''
   if (run.method === 'builtin') {
     const fact = run.facts[0]
     if (fact?.kind === 'file-exists') return `${source}${fact.matched ? 'file exists' : fact.isFile ? 'missing' : 'path exists but is not a regular file'}`
