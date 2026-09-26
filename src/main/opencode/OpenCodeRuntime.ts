@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { ModelSettings, PermissionPreset, RunnerEvent } from '../../shared/contracts'
 import type { ToolCallFact } from '../evidence/evidence'
 import {
@@ -39,6 +39,7 @@ interface ToolProjection {
 export class OpenCodeRuntime implements AgentRuntime {
   private child?: ChildProcessWithoutNullStreams
   private serverUrl?: string
+  private serverAuth?: string
   private sessionId?: string
   private closed = false
   private busy = false
@@ -82,8 +83,12 @@ export class OpenCodeRuntime implements AgentRuntime {
       credential: this.options.credential,
       permission: this.options.permission ?? 'workspace-write'
     })
+    const serverPassword = randomUUID()
+    this.serverAuth = `Basic ${Buffer.from(`codey:${serverPassword}`).toString('base64')}`
     const env: NodeJS.ProcessEnv = {
       ...process.env,
+      OPENCODE_SERVER_USERNAME: 'codey',
+      OPENCODE_SERVER_PASSWORD: serverPassword,
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
       XDG_DATA_HOME: join(this.options.storageRoot, 'data'),
       XDG_CONFIG_HOME: join(this.options.storageRoot, 'config'),
@@ -265,11 +270,11 @@ export class OpenCodeRuntime implements AgentRuntime {
 
   async close(): Promise<void> {
     if (this.closed) return
-    this.closed = true
     this.debug('runtime.close.begin', { sessionId: this.sessionId, busy: this.busy })
     if (this.busy) {
       try { await this.cancelTurn() } catch { /* best effort */ }
     }
+    this.closed = true
     this.eventAbort?.abort()
     this.eventAbort = undefined
     await Promise.race([this.eventTask ?? Promise.resolve(), delay(500)]).catch(() => {})
@@ -278,6 +283,7 @@ export class OpenCodeRuntime implements AgentRuntime {
     const child = this.child
     this.child = undefined
     this.serverUrl = undefined
+    this.serverAuth = undefined
     this.sessionId = undefined
     if (child && child.exitCode === null) {
       try { child.stdin.end() } catch { /* already closed */ }
@@ -307,7 +313,7 @@ export class OpenCodeRuntime implements AgentRuntime {
 
   private async consumeEvents(signal: AbortSignal): Promise<void> {
     const response = await fetch(`${this.requireServerUrl()}/event`, {
-      headers: { Accept: 'text/event-stream' },
+      headers: { Accept: 'text/event-stream', Authorization: this.requireServerAuth() },
       signal
     })
     if (!response.ok || !response.body) {
@@ -499,6 +505,7 @@ export class OpenCodeRuntime implements AgentRuntime {
       ...init,
       headers: {
         Accept: 'application/json',
+        Authorization: this.requireServerAuth(),
         ...(init.body ? { 'Content-Type': 'application/json' } : {}),
         ...(init.headers ?? {})
       }
@@ -515,6 +522,11 @@ export class OpenCodeRuntime implements AgentRuntime {
   private requireServerUrl(): string {
     if (!this.serverUrl) throw new Error('OpenCode server is not ready')
     return this.serverUrl
+  }
+
+  private requireServerAuth(): string {
+    if (!this.serverAuth) throw new Error('OpenCode server authentication is not ready')
+    return this.serverAuth
   }
 
   private emit(event: Omit<RunnerEvent, 'id' | 'at'>): void {
