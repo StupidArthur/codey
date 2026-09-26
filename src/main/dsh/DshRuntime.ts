@@ -118,6 +118,8 @@ export class DshRuntime {
     }
     this.child = child
     this.debug('runtime.process.spawned', { pid: child.pid, dshBin, patchPath })
+    child.once('exit', (code, signal) => this.debug('runtime.process.exit', { pid: child.pid, code, signal }))
+    child.once('error', (error) => this.debug('runtime.process.error', { pid: child.pid, error: messageOf(error) }))
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString()
       this.stderr = (this.stderr + text).slice(-4096)
@@ -153,6 +155,7 @@ export class DshRuntime {
       this.debug('runtime.start.end', { sessionId: this.sessionId })
       return { sessionId: this.sessionId }
     } catch (error) {
+      this.debug('runtime.start.error', { error: messageOf(error), stderrTail: this.stderr.trim() })
       await this.close()
       const tail = this.stderr.trim()
       throw new Error(`DSH ACP start failed: ${messageOf(error)}${tail ? ` (stderr: ${tail})` : ''}`)
@@ -287,10 +290,10 @@ export class DshRuntime {
   }
 
   private onUpdate(notification: SessionNotification): void {
-    const projector = this.projector
-    if (!projector) return
     if (notification.sessionId !== this.sessionId) return
     this.debug('acp.session.update', { sessionId: notification.sessionId, update: notification.update })
+    const projector = this.projector
+    if (!projector) return
     projector.handle(notification.update)
     for (const event of projector.drain()) this.emit(event)
   }
