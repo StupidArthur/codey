@@ -18,6 +18,7 @@ export class SessionLogger {
   private queue: Promise<void>
   private buffer: string[] = []
   private timer: ReturnType<typeof setTimeout> | undefined
+  private sequence = 0
 
   constructor(
     readonly sessionId: string,
@@ -27,11 +28,14 @@ export class SessionLogger {
     this.queue = mkdir(directory, { recursive: true }).then(() => undefined).catch(() => undefined)
   }
 
-  write(type: string, payload?: unknown): void {
+  write(type: string, payload?: unknown, context?: { runId?: string; runElapsedMs?: number }): void {
     try {
       const record = {
+        seq: ++this.sequence,
         at: new Date().toISOString(),
         sessionId: this.sessionId,
+        ...(context?.runId ? { runId: context.runId } : {}),
+        ...(context?.runElapsedMs !== undefined ? { runElapsedMs: context.runElapsedMs } : {}),
         type,
         ...(payload === undefined ? {} : { payload: redact(payload) })
       }
