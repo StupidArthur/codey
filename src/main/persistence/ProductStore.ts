@@ -303,7 +303,7 @@ export class ProductStore {
     return row && toSessionSummary(row)
   }
 
-  getSessionByDshId(backendSessionId: string): SessionSummary | undefined {
+  getSessionByBackendId(backendSessionId: string): SessionSummary | undefined {
     const row = this.stmt(`
       SELECT s.*, EXISTS(SELECT 1 FROM rounds r WHERE r.product_session_id = s.id) AS has_temporal_history
       FROM product_sessions s WHERE s.backend_session_id = ?
@@ -313,7 +313,7 @@ export class ProductStore {
 
   createSession(workspacePath: string, backendSessionId?: string, title?: string): SessionSummary {
     if (backendSessionId) {
-      const existing = this.getSessionByDshId(backendSessionId)
+      const existing = this.getSessionByBackendId(backendSessionId)
       if (existing) {
         if (existing.workspacePath !== workspacePath) {
           throw new Error('backend session is already associated with another workspace')
