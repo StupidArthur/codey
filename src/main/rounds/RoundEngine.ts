@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { EvidenceSummary, ExecutionOutcome, LoopTerminalSummary, RoundMode, RoundStatus, RoundSummary, RunnerEvent, SessionSummary } from '../../shared/contracts'
 import type { DshRuntime } from '../dsh/DshRuntime'
+import { TURN_CANCELLED_MESSAGE } from '../dsh/DshRuntime'
 import type { EvidenceCollector } from '../evidence/EvidenceCollector'
 import type { EvidenceBundle, VerificationExecutorFn, VerificationRun } from '../evidence/evidence'
 import { LoopController } from '../loop/LoopController'
@@ -18,6 +19,8 @@ export interface RoundEngineDeps {
   takeEvents: () => RunnerEvent[]
   /** Product-owned verification executor; the only source of passed/failed checks. */
   verify?: VerificationExecutorFn
+  /** True after the user requests cancellation of the current submit. */
+  isCancellationRequested?: () => boolean
   /** Persist the DSH session id after a lazy create. */
   onDshSessionCreated?: (dshSessionId: string) => void
   onRoundChanged?: () => Promise<void> | void
@@ -55,7 +58,9 @@ export class RoundEngine {
     const { store } = this.deps
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
+      throwIfCancelled(this.deps.isCancellationRequested)
       const runtime = await this.deps.ensureRuntime()
+      throwIfCancelled(this.deps.isCancellationRequested)
       const baseline = await this.deps.evidence.baseline(input.session.workspacePath)
       // Plan turns carry product-owned guidance on the SAME DSH session; the
       // stored plan version keeps the user's original spec verbatim.
@@ -79,6 +84,22 @@ export class RoundEngine {
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: 'completed' }
     } catch (error) {
+      if (isCancelled(error, this.deps.isCancellationRequested)) {
+        if (mode === 'vibe') {
+          store.appendVibeEntry(round.id, {
+            id: randomUUID(),
+            specMarkdown: input.spec,
+            assistantOutput: '',
+            executionOutcome: 'interrupted',
+            createdAt: new Date().toISOString()
+          })
+        }
+        round.updatedAt = new Date().toISOString()
+        store.saveRound(input.session.id, round)
+        try { store.markRoundExecutionFinished(input.session.id, round.id, 'active') } catch { /* already inactive */ }
+        await this.deps.onRoundChanged?.()
+        return { roundId: round.id, outcome: 'interrupted' }
+      }
       this.terminate(input.session, round, 'failed')
       await this.deps.onRoundChanged?.()
       throw error
@@ -95,13 +116,16 @@ export class RoundEngine {
     const round = this.createRound(input.session, 'loop', input.spec)
     store.markRoundExecutionStarted(input.session.id, round.id)
     try {
+      throwIfCancelled(this.deps.isCancellationRequested)
       const runtime = await this.deps.ensureRuntime()
+      throwIfCancelled(this.deps.isCancellationRequested)
       const loop = new LoopController(runtime, this.deps.evidence, undefined, Date.now, this.deps.verify)
       const result = await loop.run({
         rootSpec: input.spec,
         workspacePath: input.session.workspacePath,
         permission: input.session.permission,
-        takeEvents: this.deps.takeEvents
+        takeEvents: this.deps.takeEvents,
+        isCancelled: this.deps.isCancellationRequested
       })
       this.saveEvidence(round.id, result.evidence)
       const document = this.deps.resultBuilder.build({
@@ -124,6 +148,11 @@ export class RoundEngine {
       await this.deps.onRoundChanged?.()
       return { roundId: round.id, outcome: result.terminal.status === 'completed' ? 'completed' : 'failed' }
     } catch (error) {
+      if (isCancelled(error, this.deps.isCancellationRequested)) {
+        this.terminate(input.session, round, 'interrupted')
+        await this.deps.onRoundChanged?.()
+        return { roundId: round.id, outcome: 'interrupted' }
+      }
       this.terminate(input.session, round, 'failed')
       await this.deps.onRoundChanged?.()
       throw error
@@ -254,4 +283,12 @@ function toRoundStatus(status: LoopTerminalSummary['status']): RoundStatus {
 function titleFor(spec: string, mode: RoundMode): string {
   const line = spec.split('\n').find((part) => part.trim() && !part.trimStart().startsWith('#'))
   return line?.trim().slice(0, 64) || mode
+}
+
+function throwIfCancelled(probe?: () => boolean): void {
+  if (probe?.()) throw new Error(TURN_CANCELLED_MESSAGE)
+}
+
+function isCancelled(error: unknown, probe?: () => boolean): boolean {
+  return probe?.() === true || (error instanceof Error && error.message === TURN_CANCELLED_MESSAGE)
 }
