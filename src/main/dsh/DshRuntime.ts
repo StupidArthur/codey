@@ -40,9 +40,9 @@ export interface DshRuntimeOptions {
 
 /**
  * One window's execution path for one DSH Session, driven entirely by the
- * public ACP transport. Full mode boots the shipped `acp` profile; minimal
- * mode boots the official `sdk-minimal` composition and replaces only its SDK
- * stdio surface with the official ACP bridge.
+ * public ACP transport. Both modes boot the shipped `acp` profile. Full keeps
+ * the base agent surface; minimal keeps ACP session services but patches the
+ * model-visible surface down to DSH's shipped minimal preset.
  *
  * The SDK `sdk` profile cannot resume a persisted session (its server always
  * calls `agents.create`; see docs/dsh-upstream-resume-report.md), so execution
@@ -78,7 +78,7 @@ export class DshRuntime {
     const provider = this.options.settings.provider.trim()
     const model = this.options.settings.model.trim()
     const composition = this.options.composition ?? 'full'
-    const profile = composition === 'minimal' ? 'sdk-minimal' : 'acp'
+    const profile = 'acp'
     this.debug('runtime.start.begin', { provider, model, composition, profile, workspacePath: this.options.workspacePath, resumeSessionId: sessionId })
     const baseUrl = this.options.settings.baseUrl?.trim()
     if (!provider || !model) throw new Error('Configure a model provider and model before starting DSH')
@@ -421,47 +421,98 @@ function minimalAcpPatch(input: {
   official: boolean
   permission: PermissionPreset
 }): string {
-  const lines = [
-    '# Codey Vibe: official sdk-minimal agent kernel + official ACP transport.',
-    '- id: sdk-app-startup',
-    '  disabled: true',
-    '- id: sdk-jsonrpc-server',
-    '  disabled: true',
+  // Keep the shipped ACP application/session lifecycle intact, then starve the
+  // host plane down to the same model-visible surface as DSH's shipped minimal
+  // preset: minimal prompt + one persistent platform shell. This avoids trying
+  // to graft ACP onto sdk-minimal, whose complete tree intentionally omits ACP
+  // product services needed during session/new/resume.
+  const lines = fullAcpPatch(input).trimEnd().split('\n')
+  lines.push(
+    '- id: system-prompt',
+    '  config:',
+    '    includeHarnessIdentity: false',
+    '    includeRuntimeContext: false',
+    `    personaPrefix: ${yamlScalar('You are a helpful software engineer assistant.')}`,
+    "    personaSuffix: ''",
     '- id: sandbox-policy',
     '  config:',
     `    mode: ${yamlScalar(input.permission)}`,
-    '    workspaceRoot: !!js process.cwd()',
-    '- insert:'
+    '    workspaceRoot: !!js process.cwd()'
+  )
+
+  // These are the same host-plane model-facing rows the DSH web/preset plane
+  // starves before composing per-agent presets, plus repeat-tool-reminder which
+  // is absent from the shipped sdk-minimal tree.
+  const disabled = [
+    'tool-bash',
+    'tool-pwsh',
+    'tool-jobs',
+    'tool-fs',
+    'tool-fs-search',
+    'skill-filesystem',
+    'tool-skill',
+    'command-goal',
+    'tool-goal',
+    'plan-mode',
+    'compaction-basic',
+    'command-compact',
+    'tool-result-pruner',
+    'tool-subagent-control',
+    'tool-subagent-list-agents',
+    'tool-subagent',
+    'tool-subagent-fork',
+    'workflow-ptc',
+    'tool-workflow',
+    'tool-ralph',
+    'agent-instructions',
+    'tool-todo',
+    'tool-web',
+    'repeat-tool-reminder'
   ]
+  for (const id of disabled) lines.push(`- id: ${id}`, '  disabled: true')
 
-  if (!input.official) {
-    lines.push(
-      '    - id: llm-pi-ai',
-      "      name: '@deepseek-ai/dsh-llm-pi-ai'",
-      '      config:',
-      '        providers:',
-      `          ${yamlScalar(input.provider)}:`,
-      `            displayName: ${yamlScalar(input.provider)}`,
-      '            apiKeyEnv: TEMPORAL_LLM_API_KEY',
-      '            api: openai-completions',
-      `            baseURL: ${yamlScalar(input.baseUrl)}`,
-      '            models:',
-      `              - id: ${yamlScalar(input.model)}`,
-      `                name: ${yamlScalar(input.model)}`,
-      '                contextWindow: 131072',
-      '                maxTokens: 32768'
-    )
-  }
-
+  // Exact shipped minimal preset shell composition.
   lines.push(
-    '    - id: acp-app-startup',
-    "      name: '@deepseek-ai/dsh-acp-app'",
-    '    - id: acp',
-    "      name: '@deepseek-ai/dsh-acp'",
-    '      inject: [acpAppStartup]',
+    '- insert:',
+    '    - id: vibe-pty',
+    "      name: '@deepseek-ai/dsh-terminal'",
+    '    - id: vibe-terminal-bash',
+    "      name: '@deepseek-ai/dsh-terminal-bash'",
+    "      disabled: !!js process.platform === 'win32'",
     '      config:',
-    `        provider: ${yamlScalar(input.provider)}`,
-    `        model: ${yamlScalar(input.model)}`
+    '        timeoutMs: 300000',
+    '    - id: vibe-persistent-bash',
+    "      name: '@deepseek-ai/dsh-tool-bash-persistent'",
+    "      disabled: !!js process.platform === 'win32'",
+    '      config:',
+    '        timeoutMs: 300000',
+    '        description: |-',
+    '          Run commands in a bash shell',
+    '          * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.',
+    '          * Network access depends on the task environment. Prefer configured mirrors/proxies when they are available.',
+    '          * State is persistent across command calls and discussions with the user.',
+    "          * To inspect a particular line range of a file, e.g. lines 10-25, try 'sed -n 10,25p /path/to/the/file'.",
+    '          * Please avoid commands that may produce a very large amount of output.',
+    "          * Please run long lived commands in the background, e.g. 'sleep 10 &' or start a server in the background.",
+    '    - id: vibe-terminal-pwsh',
+    "      name: '@deepseek-ai/dsh-terminal-bash'",
+    "      disabled: !!js process.platform !== 'win32'",
+    '      config:',
+    '        shellDialect: pwsh',
+    '        timeoutMs: 300000',
+    '    - id: vibe-persistent-pwsh',
+    "      name: '@deepseek-ai/dsh-tool-pwsh-persistent'",
+    "      disabled: !!js process.platform !== 'win32'",
+    '      config:',
+    '        timeoutMs: 300000',
+    '        description: |-',
+    '          Run commands in a PowerShell shell',
+    '          * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.',
+    "          * You don't have access to the internet via this tool.",
+    '          * State is persistent across command calls and discussions with the user.',
+    '          * Use native Windows paths (C:\\...) and $env:NAME variables; this is PowerShell, not bash.',
+    '          * Please avoid commands that may produce a very large amount of output.',
+    "          * Please run long lived commands in the background, e.g. 'Start-Job' or start a server with Start-Process."
   )
   return lines.join('\n') + '\n'
 }
