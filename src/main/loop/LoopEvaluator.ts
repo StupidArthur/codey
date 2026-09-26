@@ -46,7 +46,7 @@ export interface DecideInput {
 export type CheckRequest = Omit<VerificationRequest, 'cwd' | 'turn' | 'timeoutMs' | 'permission'>
 
 /** A verification script the loop materializes so the model can run it inside
- *  DSH's sandbox; the product then reads the artifacts with its own executor. */
+ *  the active agent backend; the product then reads the artifacts with its own executor. */
 export interface SandboxScript {
   /** File name inside VERIFY_DIR (e.g. tests.cmd). */
   name: string
@@ -298,7 +298,7 @@ export class LoopEvaluator {
    * read-only executor. Shell-bound conditions follow the session permission:
    * `danger-full-access` runs the command directly (the executor still
    * enforces that preset); `workspace-write` verifies repository scripts
-   * through sandbox artifacts the model produces inside DSH's own confined
+   * through sandbox artifacts the model produces through the active agent backend's
    * execution; `read-only` has no method. There is no fallback that lets an
    * arbitrary changed file stand in for a functional requirement.
    */
@@ -372,7 +372,7 @@ function checkMethodFor(condition: RequiredItem['conditions'][number], hints: Wo
         return { kind: 'shell', command: 'cmd', args: ['/c', script] }
       }
       if (permission === 'workspace-write') {
-        // The command runs inside DSH's confined sandbox (driven by the
+        // The command runs through the active agent backend (driven by the
         // model); the product verifies the produced exit artifact itself.
         return { kind: 'content-equals', target: sandboxExitTarget(condition.kind), expected: '0' }
       }
@@ -565,7 +565,7 @@ function unresolvedToolFailures(toolFacts: EvidenceBundle['toolFacts']): string[
     const recovered = toolFacts.some(
       (other) => other.toolCallId !== fact.toolCallId && other.title === fact.title && other.status === 'completed' && other.at >= fact.at
     )
-    if (!recovered) issues.push(`DSH tool "${fact.title}" failed this turn`)
+    if (!recovered) issues.push(`agent tool "${fact.title}" failed this turn`)
   }
   return issues
 }
@@ -626,7 +626,7 @@ function validateCompletion(modelDecision: ModelDecisionShape, inventory: Eviden
 
 /** Materializes the sandbox wrapper scripts for script-kind checks under
  *  workspace-write. The product writes the script; the model runs it inside
- *  DSH's confined execution; the product reads the artifacts with its own
+ *  the active agent backend's tool execution; the product reads the artifacts with its own
  *  executor. The .exit file carries the script's real exit code. */
 function sandboxScriptsFor(requests: CheckRequest[], hints: WorkspaceHints, permission: PermissionPreset): SandboxScript[] {
   if (permission !== 'workspace-write') return []
