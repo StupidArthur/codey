@@ -9,7 +9,7 @@ export type { CheckFact }
 export const VERIFY_DIR = 'temporal-verify'
 /**
  * Structured verification facts. Only the product's own verification executor
- * may produce `passed`/`failed` verification verdicts; DSH tool telemetry
+ * may produce `passed`/`failed` verification verdicts; agent runtime tool telemetry
  * (`ToolCallFact`) is at best an `observed` fact and can never make a
  * verification pass.
  */
@@ -24,7 +24,7 @@ export interface FileState {
 
 export type FileStateMap = Map<string, FileState>
 
-/** One tool call observed over the public ACP transport (DSH provides no exit codes). */
+/** One tool call observed over the backend event stream. */
 export interface ToolCallFact {
   toolCallId: string
   turn: number
