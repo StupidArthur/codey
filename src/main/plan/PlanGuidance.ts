@@ -1,11 +1,7 @@
 /**
- * Plan turns are guidance, not sandbox. The installed DSH (0.1.7-rc.2)
- * exposes no ACP session modes (probed: `session/new` returns no `modes` and
- * `session/set_mode` is unusable), so Plan behavior is produced by an
- * explicit, product-owned instruction prepended to the user's spec, executed
- * in the SAME DSH session so the following Vibe/Loop turns keep the full
- * context. The session permission preset continues to enforce what the model
- * can actually do; the guidance asks, it does not confine.
+ * OpenCode's native `plan` primary agent supplies the read-only execution
+ * boundary. This product guidance only shapes the plan artifact returned to
+ * Codey; the same OpenCode Session is reused by later Vibe/Loop turns.
  *
  * The user's original spec is stored verbatim in the plan version; only the
  * prompt sent to the model carries the guidance.
