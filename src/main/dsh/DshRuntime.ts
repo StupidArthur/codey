@@ -26,6 +26,8 @@ export interface DshRuntimeOptions {
   /** Session-level sandbox preset; enforced by DSH via DSH_PERMISSION_MODE. */
   permission?: PermissionPreset
   onEvent?: (event: RunnerEvent) => void
+  /** High-detail per-session diagnostics used to analyze slow runs. */
+  onDebug?: (type: string, payload?: unknown) => void
   /** Absolute path to the built `dsh` CLI module; omitted resolves the installed @deepseek-ai/dsh. */
   dshBin?: string
   /** Optional bound (ms) on one prompt turn. 0 disables the bound (long-running turns). */
@@ -55,6 +57,7 @@ export class DshRuntime {
   private patchDir?: string
   private stderr = ''
   private protocolVersion = 1
+  private promptSequence = 0
 
   constructor(private readonly options: DshRuntimeOptions) {}
 
@@ -68,6 +71,7 @@ export class DshRuntime {
     }
     const provider = this.options.settings.provider.trim()
     const model = this.options.settings.model.trim()
+    this.debug('runtime.start.begin', { provider, model, workspacePath: this.options.workspacePath, resumeSessionId: sessionId })
     const baseUrl = this.options.settings.baseUrl?.trim()
     if (!provider || !model) throw new Error('Configure a model provider and model before starting DSH')
     const official = provider === 'deepseek-official'
@@ -113,8 +117,11 @@ export class DshRuntime {
       throw new Error(`Failed to launch DSH ACP runtime: ${messageOf(error)}`)
     }
     this.child = child
+    this.debug('runtime.process.spawned', { pid: child.pid, dshBin, patchPath })
     child.stderr.on('data', (chunk: Buffer) => {
-      this.stderr = (this.stderr + chunk.toString()).slice(-4096)
+      const text = chunk.toString()
+      this.stderr = (this.stderr + text).slice(-4096)
+      this.debug('runtime.stderr', { text })
     })
 
     try {
@@ -125,18 +132,25 @@ export class DshRuntime {
         Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>,
         Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>
       ))
+      this.debug('acp.initialize.start', { protocolVersion: this.protocolVersion })
       await this.connection.agent.request('initialize', {
         protocolVersion: this.protocolVersion,
         clientCapabilities: {}
       })
+      this.debug('acp.initialize.end', { protocolVersion: this.protocolVersion })
       const cwd = this.options.workspacePath
       if (sessionId) {
+        this.debug('acp.session.resume.start', { sessionId, cwd })
         await this.connection.agent.request('session/resume', { sessionId, cwd, mcpServers: [] })
         this.sessionId = sessionId
+        this.debug('acp.session.resume.end', { sessionId, cwd })
       } else {
+        this.debug('acp.session.new.start', { cwd })
         const created = await this.connection.agent.request('session/new', { cwd, mcpServers: [] })
         this.sessionId = created.sessionId
+        this.debug('acp.session.new.end', { sessionId: created.sessionId, cwd })
       }
+      this.debug('runtime.start.end', { sessionId: this.sessionId })
       return { sessionId: this.sessionId }
     } catch (error) {
       await this.close()
@@ -155,11 +169,14 @@ export class DshRuntime {
 
     this.busy = true
     this.cancelRequested = false
+    const promptSequence = ++this.promptSequence
+    const promptStartedAt = Date.now()
     const projector = new TurnProjector()
     this.projector = projector
     this.turnToolFacts = []
     const controller = new AbortController()
     const timeoutMs = opts?.timeoutMs ?? this.options.requestTimeoutMs ?? 0
+    this.debug('prompt.start', { promptSequence, timeoutMs, chars: spec.length, text: spec })
     let deadlineHit = false
     const timer = timeoutMs > 0
       ? setTimeout(() => {
@@ -189,6 +206,7 @@ export class DshRuntime {
         throw new Error(TURN_DEADLINE_MESSAGE)
       }
       if (this.cancelRequested) throw new Error(TURN_CANCELLED_MESSAGE)
+      this.debug('prompt.response', { promptSequence, durationMs: Date.now() - promptStartedAt, assistantChars: projector.assistantText.length })
       return { text: projector.assistantText }
     } catch (error) {
       if (deadlineHit) {
@@ -207,6 +225,7 @@ export class DshRuntime {
       // projector's map alive for the whole turn so later updates can upgrade
       // pending facts to completed/failed before we expose the final snapshot.
       this.turnToolFacts = projector.drainToolFacts()
+      this.debug('prompt.finalize', { promptSequence, durationMs: Date.now() - promptStartedAt, toolFacts: this.turnToolFacts, assistantChars: projector.assistantText.length })
       this.projector = undefined
       this.busy = false
       this.cancelRequested = false
@@ -221,11 +240,14 @@ export class DshRuntime {
     const sessionId = this.sessionId
     if (!connection || !sessionId || this.closed || !this.busy) return false
     this.cancelRequested = true
+    this.debug('acp.session.cancel.start', { sessionId })
     try {
       await connection.agent.notify('session/cancel', { sessionId })
+      this.debug('acp.session.cancel.sent', { sessionId })
       return true
-    } catch {
+    } catch (error) {
       this.cancelRequested = false
+      this.debug('acp.session.cancel.error', { sessionId, error: messageOf(error) })
       return false
     }
   }
@@ -233,6 +255,7 @@ export class DshRuntime {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.debug('runtime.close.begin', { sessionId: this.sessionId, busy: this.busy })
     const connection = this.connection
     const sessionId = this.sessionId
     this.connection = undefined
@@ -257,12 +280,14 @@ export class DshRuntime {
       if (!reaped) child.kill('SIGKILL')
     }
     await this.cleanupPatch()
+    this.debug('runtime.close.end', { sessionId })
   }
 
   private onUpdate(notification: SessionNotification): void {
     const projector = this.projector
     if (!projector) return
     if (notification.sessionId !== this.sessionId) return
+    this.debug('acp.session.update', { sessionId: notification.sessionId, update: notification.update })
     projector.handle(notification.update)
     for (const event of projector.drain()) this.emit(event)
   }
@@ -284,6 +309,7 @@ export class DshRuntime {
    * the workspace boundary to DSH's sandbox.
    */
   private onPermission(params: RequestPermissionRequest): { outcome: { outcome: 'selected'; optionId: string } } | { outcome: { outcome: 'cancelled' } } {
+    this.debug('acp.permission.request', params)
     const options = params.options ?? []
     const allow = options.find((option) => option.kind === 'allow_once') ?? options.find((option) => option.kind === 'allow_always')
     const reject = options.find((option) => option.kind === 'reject_once') ?? options.find((option) => option.kind === 'reject_always')
@@ -292,10 +318,12 @@ export class DshRuntime {
     const permitted = this.options.permission !== 'read-only' || allowedKinds.has(kind)
     if (permitted && allow) {
       this.emit({ kind: 'status', message: `permission granted (${kind})` })
+      this.debug('acp.permission.decision', { kind, decision: 'allow', optionId: allow.optionId })
       return { outcome: { outcome: 'selected', optionId: allow.optionId } }
     }
     if (!permitted && reject) {
       this.emit({ kind: 'status', message: `permission denied by read-only (${kind})` })
+      this.debug('acp.permission.decision', { kind, decision: 'reject', optionId: reject.optionId })
       return { outcome: { outcome: 'selected', optionId: reject.optionId } }
     }
     this.emit({ kind: 'error', message: `DSH permission request had no ${permitted ? 'allow' : 'reject'} option (${kind})` })
@@ -304,6 +332,10 @@ export class DshRuntime {
 
   private emit(event: ProjectedEvent): void {
     this.options.onEvent?.({ id: randomUUID(), at: new Date().toISOString(), kind: event.kind, message: event.message })
+  }
+
+  private debug(type: string, payload?: unknown): void {
+    this.options.onDebug?.(type, payload)
   }
 
   private async cleanupPatch(): Promise<void> {
