@@ -544,10 +544,7 @@ function buildOpenCodeConfig(input: {
     ...(input.baseUrl ? { npm: '@ai-sdk/openai-compatible' } : {}),
     ...(Object.keys(providerOptions).length ? { options: providerOptions } : {}),
     models: {
-      [input.model]: {
-        name: input.model,
-        limit: { context: 131072, output: 32768 }
-      }
+      [input.model]: { name: input.model }
     }
   }
 
@@ -556,7 +553,6 @@ function buildOpenCodeConfig(input: {
     autoupdate: false,
     share: 'disabled',
     model: input.modelRef,
-    small_model: input.modelRef,
     provider: { [input.providerId]: providerConfig },
     permission: globalPermission,
     agent: {
@@ -615,11 +611,6 @@ export function resolveOpenCodeBinary(): string {
     }
     const vendored = join(process.cwd(), 'vendor', 'opencode', 'opencode.exe')
     if (existsSync(vendored)) return vendored
-    try {
-      const packagePath = require.resolve('opencode-windows-x64/package.json')
-      const native = join(dirname(packagePath), 'bin', 'opencode.exe')
-      if (existsSync(native)) return native
-    } catch { /* optional development fallback */ }
     return 'opencode.exe'
   }
   return 'opencode'
