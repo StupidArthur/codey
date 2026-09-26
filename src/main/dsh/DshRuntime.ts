@@ -195,6 +195,10 @@ export class DshRuntime {
       throw error
     } finally {
       if (timer) clearTimeout(timer)
+      // Tool-call updates for one ACP call arrive incrementally. Keep the
+      // projector's map alive for the whole turn so later updates can upgrade
+      // pending facts to completed/failed before we expose the final snapshot.
+      this.turnToolFacts = projector.drainToolFacts()
       this.projector = undefined
       this.busy = false
     }
@@ -250,7 +254,6 @@ export class DshRuntime {
     if (notification.sessionId !== this.sessionId) return
     projector.handle(notification.update)
     for (const event of projector.drain()) this.emit(event)
-    this.turnToolFacts.push(...projector.drainToolFacts())
   }
 
   /** Returns and clears the structured tool facts for the most recent turn. */
