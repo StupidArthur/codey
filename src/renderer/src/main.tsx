@@ -381,7 +381,7 @@ function App(): React.JSX.Element {
       </main> :
       <main className={`workspace ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
         <aside className="sidebar" aria-label="Session 时间线">
-          <div className="sidebar-header"><button className="icon-button" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}>{sidebarCollapsed ? '›' : '‹'}</button><div className="sidebar-name"><strong>{snapshot.session.title}</strong><small title={snapshot.workspacePath ?? ''}>{snapshot.workspacePath}</small></div></div>
+          <div className="sidebar-header"><button className="icon-button sidebar-toggle" onClick={() => setSidebarCollapsed(!sidebarCollapsed)} aria-label={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'} title={sidebarCollapsed ? '展开侧栏' : '折叠侧栏'}><span className="sidebar-toggle-glyph" aria-hidden="true"><i/></span></button><div className="sidebar-name"><strong>{snapshot.session.title}</strong><small title={snapshot.workspacePath ?? ''}>{snapshot.workspacePath}</small></div></div>
           <nav className="timeline" aria-label="Round 列表">
             {snapshot.rounds.map(round => <button key={round.id} className={`timeline-item ${selectedId === round.id ? 'selected' : ''}`} onClick={() => setSelectedId(round.id)} title={`Round ${round.sequence} · ${modeLabels[round.mode]} · ${statusLabels[round.status]}`}>
               <span className="thumbnail-page" data-round={round.sequence}>
