@@ -5,6 +5,9 @@ import { ProductStore } from './persistence/ProductStore'
 import { CredentialVault } from './settings/CredentialVault'
 import { WindowController } from './WindowController'
 
+app.setName('Temporal Workspace OpenCode')
+app.setPath('userData', join(app.getPath('appData'), 'Temporal Workspace OpenCode'))
+
 const controllers = new Map<number, WindowController>()
 const pendingDisposals = new Set<Promise<void>>()
 let store: ProductStore
@@ -30,7 +33,7 @@ function createWindow(): void {
     minWidth: 1050,
     minHeight: 680,
     show: false,
-    title: 'Temporal Workspace',
+    title: 'Temporal Workspace OpenCode',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -40,7 +43,7 @@ function createWindow(): void {
   })
 
   const webContentsId = window.webContents.id
-  controllers.set(webContentsId, new WindowController(window, store, vault))
+  controllers.set(webContentsId, new WindowController(window, store, vault, join(app.getPath('userData'), 'opencode-runtime')))
   window.once('ready-to-show', () => window.show())
   window.on('closed', () => {
     const controller = controllers.get(webContentsId)
@@ -75,7 +78,7 @@ function registerIpc(): void {
 }
 
 void app.whenReady().then(() => {
-  store = new ProductStore(join(app.getPath('userData'), 'temporal-workspace.sqlite'))
+  store = new ProductStore(join(app.getPath('userData'), 'temporal-workspace-opencode.sqlite'))
   vault = new CredentialVault(join(app.getPath('userData'), 'model-credential.bin'))
   registerIpc()
   Menu.setApplicationMenu(Menu.buildFromTemplate([
