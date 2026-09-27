@@ -14,6 +14,7 @@ const checks = [
   ['runtime authenticates local server', runtime.includes('OPENCODE_SERVER_PASSWORD') && runtime.includes('Authorization: this.requireServerAuth()')],
   ['runtime routes every request to workspace', runtime.includes("'x-opencode-directory': encodeURIComponent(this.options.workspacePath)")],
   ['runtime locks permissions after config merge', runtime.includes('OPENCODE_PERMISSION: JSON.stringify(permissionConfig(')],
+  ['runtime isolates private Codey agents', runtime.includes('codey-build-${randomUUID()}') && runtime.includes('codey-plan-${randomUUID()}') && runtime.includes('agent: backendAgent')],
   ['runtime verifies bundled version', runtime.includes('Bundled OpenCode version mismatch')],
   ['runtime supports session resume/create', runtime.includes('opencode.session.resume.start') && runtime.includes('opencode.session.create.start')],
   ['runtime supports public abort', runtime.includes('/abort') && runtime.includes('cancelTurn()')],
