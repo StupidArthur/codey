@@ -1,3 +1,5 @@
+> **Repository moved:** Active OpenCode-backed Codey development now lives in `StupidArthur/codey-opencode` on its `main` branch. This branch is retained as the migration source/history checkpoint.
+
 # Temporal Workspace — OpenCode Edition
 
 Temporal Workspace is an Electron + React desktop workspace focused on the interaction and presentation layer around coding agents: Temporal Rounds, Plan/Vibe/Loop modes, Result documents, a live Runner, evidence, and verification.
