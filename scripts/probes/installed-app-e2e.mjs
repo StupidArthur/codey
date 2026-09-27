@@ -61,14 +61,20 @@ report.pageUrlIsPackaged = page.url.includes('resources/app/out/renderer/index.h
 
 const socket = new WebSocket(page.webSocketDebuggerUrl)
 await new Promise((resolve, reject) => {
-  socket.once('open', resolve)
-  socket.once('error', reject)
+  socket.addEventListener('open', resolve, { once: true })
+  socket.addEventListener('error', () => reject(new Error('CDP WebSocket connection failed')), { once: true })
 })
 
 let nextId = 0
 const pending = new Map()
-socket.on('message', (raw) => {
-  const msg = JSON.parse(raw.toString())
+socket.addEventListener('message', (event) => {
+  const raw = event.data
+  const text =
+    typeof raw === 'string' ? raw :
+    raw instanceof ArrayBuffer ? Buffer.from(raw).toString('utf8') :
+    ArrayBuffer.isView(raw) ? Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString('utf8') :
+    String(raw)
+  const msg = JSON.parse(text)
   if (msg.id && pending.has(msg.id)) {
     const { resolve, reject } = pending.get(msg.id)
     pending.delete(msg.id)
@@ -76,11 +82,11 @@ socket.on('message', (raw) => {
     else resolve(msg.result)
   }
 })
-socket.on('close', () => {
+socket.addEventListener('close', () => {
   for (const { reject } of pending.values()) reject(new Error('CDP socket closed'))
   pending.clear()
 })
-socket.on('error', () => {
+socket.addEventListener('error', () => {
   for (const { reject } of pending.values()) reject(new Error('CDP socket error'))
   pending.clear()
 })
