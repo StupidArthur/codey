@@ -55,3 +55,21 @@ jobs:
 
       - name: OpenCode inherited-stdio shell regression
         run: pnpm probe:opencode:shell-hang
+
+      - name: Prepare Electron runtime
+        run: pnpm prepare:electron
+
+      - name: Package unpacked Windows app
+        run: pnpm exec electron-builder --win --x64 --dir
+
+      - name: Verify packaged OpenCode resource
+        shell: pwsh
+        run: |
+          $path = "release\win-unpacked\resources\opencode\opencode.exe"
+          if (-not (Test-Path $path)) { throw "Packaged OpenCode runtime missing: $path" }
+          $expected = "03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A"
+          $actual = (Get-FileHash -Algorithm SHA256 $path).Hash.ToUpperInvariant()
+          if ($actual -ne $expected) { throw "Packaged OpenCode SHA256 mismatch: $actual" }
+          $version = (& $path --version 2>&1 | Select-Object -First 1).ToString().Trim()
+          if ($version -ne "1.18.31") { throw "Packaged OpenCode version mismatch: $version" }
+          Write-Host "PASS packaged OpenCode $version SHA256 $actual"
