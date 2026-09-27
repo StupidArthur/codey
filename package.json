@@ -7,10 +7,11 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "dist:win": "pnpm prepare:opencode && electron-vite build && electron-builder --win nsis --x64",
+    "dist:win": "pnpm prepare:electron && pnpm prepare:opencode && electron-vite build && electron-builder --win nsis --x64",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "electron-vite preview",
     "prepare:opencode": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-opencode.ps1",
+    "prepare:electron": "node scripts/prepare-electron.mjs",
     "probe:opencode": "node scripts/probes/opencode-runtime-static.mjs",
     "probe:opencode:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probes/opencode-smoke.ps1"
   },
