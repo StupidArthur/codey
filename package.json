@@ -13,7 +13,8 @@
     "prepare:opencode": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-opencode.ps1",
     "prepare:electron": "node scripts/prepare-electron.mjs",
     "probe:opencode": "node scripts/probes/opencode-runtime-static.mjs",
-    "probe:opencode:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probes/opencode-smoke.ps1"
+    "probe:opencode:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probes/opencode-smoke.ps1",
+    "probe:opencode:shell-hang": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probes/opencode-shell-inherited-stdio.ps1"
   },
   "dependencies": {
     "codemirror": "^6.0.0",
