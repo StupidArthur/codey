@@ -146,7 +146,7 @@ export class LoopController {
         if (failure.includes(TURN_DEADLINE_MESSAGE)) {
           return this.finish(
             'budget_exhausted',
-            'Loop reached the wall-clock budget during a model turn; the turn was cancelled through the public the backend's public abort API and the collected evidence is preserved.',
+            'Loop reached the wall-clock budget during a model turn; the turn was cancelled through the backend's public abort API and the collected evidence is preserved.',
             finalResponse, bundle, continuations, lastDecision
           )
         }
