@@ -480,7 +480,7 @@ export class OpenCodeRuntime implements AgentRuntime {
       })
     }
 
-    if (status === 'completed' || status === 'failed') {
+    if ((status === 'completed' || status === 'failed') && previous?.status !== status) {
       const time = asRecord(state.time)
       const endedAt = numberOf(time.end) ?? Date.now()
       const duration = startedAt !== undefined ? formatDuration(Math.max(0, endedAt - startedAt)) : ''
