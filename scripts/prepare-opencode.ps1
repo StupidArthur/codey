@@ -17,6 +17,19 @@ $Url = "https://github.com/$Repo/releases/download/$ReleaseTag/$AssetName"
 $ExpectedZipSha256 = '7E311D2AFAA775F705CB251524F48A57FE0D1336D7EA0261E8E9C4C48F272AA5'
 $ExpectedExeSha256 = '03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A'
 
+function Get-CodeySha256([string] $Path) {
+  $Stream = [System.IO.File]::OpenRead($Path)
+  $Sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $Bytes = $Sha.ComputeHash($Stream)
+    return ([System.BitConverter]::ToString($Bytes)).Replace('-', '').ToUpperInvariant()
+  }
+  finally {
+    $Sha.Dispose()
+    $Stream.Dispose()
+  }
+}
+
 $Root = Split-Path -Parent $PSScriptRoot
 $VendorDir = Join-Path $Root 'vendor\opencode'
 $Target = Join-Path $VendorDir 'opencode.exe'
@@ -24,7 +37,7 @@ $Target = Join-Path $VendorDir 'opencode.exe'
 New-Item -ItemType Directory -Force -Path $VendorDir | Out-Null
 
 if (Test-Path $Target) {
-  $ExistingSha = (Get-FileHash -Algorithm SHA256 $Target).Hash.ToUpperInvariant()
+  $ExistingSha = Get-CodeySha256 $Target
   if ($ExistingSha -eq $ExpectedExeSha256) {
     $Current = (& $Target --version 2>$null | Select-Object -First 1).ToString().Trim()
     if ($Current -match [regex]::Escape($Version)) {
@@ -48,7 +61,7 @@ try {
     throw "Download failure: could not download $Url. $($_.Exception.Message)"
   }
 
-  $ActualZip = (Get-FileHash -Algorithm SHA256 $Zip).Hash.ToUpperInvariant()
+  $ActualZip = Get-CodeySha256 $Zip
   if ($ActualZip -ne $ExpectedZipSha256) {
     throw "Checksum mismatch: archive SHA256 $ActualZip does not match pinned $ExpectedZipSha256"
   }
@@ -61,7 +74,7 @@ try {
 
   Copy-Item -Force $Exe.FullName $Target
 
-  $ActualExe = (Get-FileHash -Algorithm SHA256 $Target).Hash.ToUpperInvariant()
+  $ActualExe = Get-CodeySha256 $Target
   if ($ActualExe -ne $ExpectedExeSha256) {
     Remove-Item -Force $Target -ErrorAction SilentlyContinue
     throw "Checksum mismatch: extracted opencode.exe SHA256 $ActualExe does not match pinned $ExpectedExeSha256"
