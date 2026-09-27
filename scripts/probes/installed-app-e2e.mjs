@@ -25,24 +25,9 @@
  * Prints only counts, kinds, statuses, booleans and the workspace file check.
  * Never prints the credential, prompts, or model output text.
  */
-import { createRequire } from 'node:module'
-import { mkdtemp, readFile, readdir, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const here = dirname(fileURLToPath(import.meta.url))
-const repoRoot = join(here, '..', '..')
-const require = createRequire(import.meta.url)
-
-// `ws` is a transitive dependency under pnpm's isolated store, not a root dep.
-async function resolveWs() {
-  const store = join(repoRoot, 'node_modules', '.pnpm')
-  const dir = (await readdir(store)).find((name) => /^ws@/.test(name))
-  if (!dir) throw new Error('ws package not found in pnpm store')
-  return require(join(store, dir, 'node_modules', 'ws'))
-}
-const WebSocket = await resolveWs()
+import { join } from 'node:path'
 
 const CDP_PORT = process.env.TEMPORAL_CDP_PORT ?? '9222'
 const provider = process.env.TEMPORAL_TEST_PROVIDER ?? 'volc-ark'
