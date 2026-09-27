@@ -1,0 +1,59 @@
+name: Windows
+
+on:
+  push:
+    branches:
+      - backend/opencode-v1.18.31
+  pull_request:
+    branches:
+      - backend/opencode-v1.18.31
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  opencode-edition:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Static OpenCode contract probe
+        run: pnpm probe:opencode
+
+      # Downloads the pinned patched backend artifact and verifies its fixed
+      # SHA-256. The artifact is produced by StupidArthur/opencode-fork and is
+      # never built from the fork during CI.
+      - name: Prepare pinned OpenCode backend
+        run: pnpm prepare:opencode
+
+      - name: OpenCode server smoke
+        run: pnpm probe:opencode:smoke
+
+      - name: OpenCode inherited-stdio shell regression
+        run: pnpm probe:opencode:shell-hang
