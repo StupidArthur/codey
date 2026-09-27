@@ -26,7 +26,9 @@ const checks = [
   ['runtime prewarms while editing', controller.includes("prewarmRuntime(mode, 'draft.save')") && controller.includes("scheduleRuntimePrewarm(snapshot.mode, 'session.open', 800)")],
   ['all modes share one backend runtime', controller.includes('All product modes share one OpenCode runtime/session')],
   ['installer bundles opencode.exe', builder.includes('vendor/opencode/opencode.exe') && builder.includes('to: opencode/opencode.exe')],
-  ['prepare script pins release checksum', prepare.includes("$Version = '1.18.31'") && prepare.includes('0ECD7FFC7F26390CE7799E7BCD409E4F11C410144308A6A5B0FCDCE63D871006')],
+  ['prepare script pins patched Codey backend', prepare.includes("$Version = '1.18.31'") && prepare.includes('StupidArthur/opencode-fork') && prepare.includes('codey-opencode-v1.18.31-p1') && prepare.includes('03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A')],
+  ['runtime has no PATH fallback', runtime.includes('must not use a system OpenCode') && !runtime.includes("return 'opencode.exe'")],
+  ['runtime records backend identity', runtime.includes("opencode.backend.identity") && runtime.includes('StupidArthur/opencode-fork') && runtime.includes('03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A')],
   ['package identifies OpenCode edition', pkg.name === 'temporal-workspace-opencode' && pkg.description.includes('OpenCode 1.18.31')],
 ]
 

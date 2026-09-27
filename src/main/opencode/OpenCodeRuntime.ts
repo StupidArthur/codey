@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { app } from 'electron'
 import type { ModelSettings, PermissionPreset, RunnerEvent } from '../../shared/contracts'
 import type { ToolCallFact } from '../evidence/evidence'
 import {
@@ -11,6 +12,14 @@ import {
 } from '../runtime/AgentRuntime'
 
 export const OPENCODE_VERSION = '1.18.31'
+/** Pinned provenance of the bundled backend binary: Codey's own patched OpenCode build. */
+export const OPENCODE_BACKEND = {
+  source: 'StupidArthur/opencode-fork',
+  commit: 'cf50cd4e9294aaf260e0742ffffefca9181fd64d',
+  basePatchCommit: '93dbf6f64cbf6402549289cf2eb56ee4c2474c57',
+  patch: 'windows-shell-inherited-stdio',
+  binarySha256: '03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A'
+} as const
 const SERVER_START_TIMEOUT_MS = 30_000
 const CLOSE_TIMEOUT_MS = 5_000
 
@@ -72,6 +81,7 @@ export class OpenCodeRuntime implements AgentRuntime {
     const modelRef = `${providerId}/${model}`
     const baseUrl = this.options.settings.baseUrl?.trim()
     const bin = this.options.opencodeBin ?? resolveOpenCodeBinary()
+    const binarySha256 = binarySha256Of(bin)
 
     await mkdir(this.options.storageRoot, { recursive: true })
     await mkdir(join(this.options.storageRoot, 'data'), { recursive: true })
@@ -108,6 +118,9 @@ export class OpenCodeRuntime implements AgentRuntime {
     this.debug('runtime.start.begin', {
       backend: 'opencode',
       version: OPENCODE_VERSION,
+      backendSource: OPENCODE_BACKEND.source,
+      backendCommit: OPENCODE_BACKEND.commit,
+      backendPatch: OPENCODE_BACKEND.patch,
       provider: providerId,
       model,
       modelRef,
@@ -150,6 +163,19 @@ export class OpenCodeRuntime implements AgentRuntime {
         throw new Error(`Bundled OpenCode version mismatch: expected ${OPENCODE_VERSION}, got ${version}`)
       }
       this.debug('opencode.health', health)
+
+      const actualSha256 = await binarySha256.catch(() => undefined)
+      this.debug('opencode.backend.identity', {
+        backend: 'opencode',
+        backendVersion: OPENCODE_VERSION,
+        backendSource: OPENCODE_BACKEND.source,
+        backendCommit: OPENCODE_BACKEND.commit,
+        backendPatch: OPENCODE_BACKEND.patch,
+        backendBinaryPath: bin,
+        backendBinarySha256: actualSha256 ?? OPENCODE_BACKEND.binarySha256,
+        backendBinarySha256Pinned: OPENCODE_BACKEND.binarySha256,
+        backendBinarySha256MatchesPin: actualSha256 ? actualSha256 === OPENCODE_BACKEND.binarySha256 : null
+      })
 
       this.startEventStream()
 
@@ -640,17 +666,43 @@ export function resolveOpenCodeBinary(): string {
   const explicit = process.env.CODEY_OPENCODE_BIN?.trim()
   if (explicit) return explicit
 
-  if (process.platform === 'win32') {
-    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
-    if (resourcesPath) {
-      const packaged = join(resourcesPath, 'opencode', 'opencode.exe')
-      if (existsSync(packaged)) return packaged
-    }
-    const vendored = join(process.cwd(), 'vendor', 'opencode', 'opencode.exe')
-    if (existsSync(vendored)) return vendored
-    return 'opencode.exe'
+  if (process.platform !== 'win32') return 'opencode'
+
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+  const packaged = resourcesPath ? join(resourcesPath, 'opencode', 'opencode.exe') : undefined
+  const vendored = join(process.cwd(), 'vendor', 'opencode', 'opencode.exe')
+
+  if (packaged && existsSync(packaged)) return packaged
+  if (existsSync(vendored)) return vendored
+
+  // Never fall back to a PATH lookup: the user's machine may have another
+  // OpenCode (official, nightly, or a different fork) installed globally.
+  if (app.isPackaged) {
+    throw new Error(
+      `Bundled OpenCode runtime is missing: expected ${packaged ?? 'resources\\opencode\\opencode.exe'}. ` +
+      'This installation is incomplete and must not use a system OpenCode.'
+    )
   }
-  return 'opencode'
+  throw new Error(
+    `OpenCode runtime is missing: expected ${vendored}. Run \`pnpm prepare:opencode\` first.`
+  )
+}
+
+const binaryShaCache = new Map<string, Promise<string>>()
+
+/** SHA-256 of the backend binary, computed once per resolved path. */
+function binarySha256Of(path: string): Promise<string> {
+  const cached = binaryShaCache.get(path)
+  if (cached) return cached
+  const promise = new Promise<string>((resolve, reject) => {
+    const hash = createHash('sha256')
+    const stream = createReadStream(path)
+    stream.on('error', reject)
+    stream.on('data', (chunk) => hash.update(chunk))
+    stream.on('end', () => resolve(hash.digest('hex').toUpperCase()))
+  })
+  binaryShaCache.set(path, promise)
+  return promise
 }
 
 async function waitForServer(child: ChildProcessWithoutNullStreams): Promise<string> {
