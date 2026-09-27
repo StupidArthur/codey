@@ -90,12 +90,16 @@ export class OpenCodeRuntime implements AgentRuntime {
       OPENCODE_SERVER_USERNAME: 'codey',
       OPENCODE_SERVER_PASSWORD: serverPassword,
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+      // OpenCode applies OPENCODE_PERMISSION after project/global/managed config.
+      // Re-assert Codey's Session permission boundary at the final permission merge.
+      OPENCODE_PERMISSION: JSON.stringify(permissionConfig(this.options.permission ?? 'workspace-write')),
       XDG_DATA_HOME: join(this.options.storageRoot, 'data'),
       XDG_CONFIG_HOME: join(this.options.storageRoot, 'config'),
       XDG_CACHE_HOME: join(this.options.storageRoot, 'cache'),
       OPENCODE_DISABLE_AUTOUPDATE: '1'
     }
 
+    this.emit({ kind: 'status', message: `Starting OpenCode ${OPENCODE_VERSION}…` })
     this.debug('runtime.start.begin', {
       backend: 'opencode',
       version: OPENCODE_VERSION,
@@ -132,6 +136,7 @@ export class OpenCodeRuntime implements AgentRuntime {
 
     try {
       this.serverUrl = await waitForServer(child)
+      this.emit({ kind: 'status', message: 'OpenCode server ready' })
       this.debug('opencode.server.ready', { url: this.serverUrl })
 
       const health = await this.request<Json>('/global/health')
@@ -144,6 +149,7 @@ export class OpenCodeRuntime implements AgentRuntime {
       this.startEventStream()
 
       if (sessionId) {
+        this.emit({ kind: 'status', message: 'Resuming OpenCode session…' })
         this.debug('opencode.session.resume.start', { sessionId })
         const existing = await this.request<Json>(`/session/${encodeURIComponent(sessionId)}`)
         const directory = typeof existing.directory === 'string' ? existing.directory : undefined
@@ -153,6 +159,7 @@ export class OpenCodeRuntime implements AgentRuntime {
         this.sessionId = sessionId
         this.debug('opencode.session.resume.end', { sessionId })
       } else {
+        this.emit({ kind: 'status', message: 'Creating OpenCode session…' })
         this.debug('opencode.session.create.start', { workspacePath: this.options.workspacePath })
         const created = await this.request<Json>('/session', {
           method: 'POST',
@@ -164,6 +171,7 @@ export class OpenCodeRuntime implements AgentRuntime {
         this.debug('opencode.session.create.end', { sessionId: createdId })
       }
 
+      this.emit({ kind: 'status', message: 'OpenCode runtime ready' })
       this.debug('runtime.start.end', { sessionId: this.sessionId })
       return { sessionId: this.sessionId }
     } catch (error) {
@@ -192,6 +200,7 @@ export class OpenCodeRuntime implements AgentRuntime {
     this.turnToolFacts = []
     this.tools.clear()
     this.reasoningParts.clear()
+    this.emit({ kind: 'status', message: `Waiting for model · ${agent}` })
     this.debug('prompt.start', { promptSequence, timeoutMs, agent, chars: spec.length, text: spec })
 
     const controller = new AbortController()
