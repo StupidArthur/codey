@@ -68,7 +68,14 @@ jobs:
           $path = "release\win-unpacked\resources\opencode\opencode.exe"
           if (-not (Test-Path $path)) { throw "Packaged OpenCode runtime missing: $path" }
           $expected = "03CA853EAAE717FA45A5E8BC180707F865E82F7DF6089816EBAA6988B67D259A"
-          $actual = (Get-FileHash -Algorithm SHA256 $path).Hash.ToUpperInvariant()
+          $stream = [System.IO.File]::OpenRead($path)
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $actual = ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToUpperInvariant()
+          } finally {
+            $sha.Dispose()
+            $stream.Dispose()
+          }
           if ($actual -ne $expected) { throw "Packaged OpenCode SHA256 mismatch: $actual" }
           $version = (& $path --version 2>&1 | Select-Object -First 1).ToString().Trim()
           if ($version -ne "1.18.31") { throw "Packaged OpenCode version mismatch: $version" }
