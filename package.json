@@ -10,7 +10,9 @@
     "dist:win": "pnpm prepare:opencode && electron-vite build && electron-builder --win nsis --x64",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "start": "electron-vite preview",
-    "prepare:opencode": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-opencode.ps1"
+    "prepare:opencode": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-opencode.ps1",
+    "probe:opencode": "node scripts/probes/opencode-runtime-static.mjs",
+    "probe:opencode:smoke": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/probes/opencode-smoke.ps1"
   },
   "dependencies": {
     "codemirror": "^6.0.0",
