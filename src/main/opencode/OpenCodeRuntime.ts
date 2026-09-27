@@ -50,6 +50,10 @@ export class OpenCodeRuntime implements AgentRuntime {
   private turnToolFacts: ToolCallFact[] = []
   private tools = new Map<string, ToolProjection>()
   private reasoningParts = new Set<string>()
+  private readonly agentNames = {
+    build: `codey-build-${randomUUID()}`,
+    plan: `codey-plan-${randomUUID()}`
+  }
 
   constructor(private readonly options: OpenCodeRuntimeOptions) {}
 
@@ -81,7 +85,8 @@ export class OpenCodeRuntime implements AgentRuntime {
       modelRef,
       baseUrl,
       credential: this.options.credential,
-      permission: this.options.permission ?? 'workspace-write'
+      permission: this.options.permission ?? 'workspace-write',
+      agentNames: this.agentNames
     })
     const serverPassword = randomUUID()
     this.serverAuth = `Basic ${Buffer.from(`codey:${serverPassword}`).toString('base64')}`
@@ -191,6 +196,7 @@ export class OpenCodeRuntime implements AgentRuntime {
     const providerID = normalizeProviderId(this.options.settings.provider)
     const modelID = this.options.settings.model.trim()
     const agent = options.agent ?? 'build'
+    const backendAgent = this.agentNames[agent]
     const timeoutMs = options.timeoutMs ?? 0
     const promptSequence = ++this.promptSequence
     const startedAt = Date.now()
@@ -201,7 +207,7 @@ export class OpenCodeRuntime implements AgentRuntime {
     this.tools.clear()
     this.reasoningParts.clear()
     this.emit({ kind: 'status', message: `Waiting for model · ${agent}` })
-    this.debug('prompt.start', { promptSequence, timeoutMs, agent, chars: spec.length, text: spec })
+    this.debug('prompt.start', { promptSequence, timeoutMs, agent, backendAgent, chars: spec.length, text: spec })
 
     const controller = new AbortController()
     let deadlineHit = false
@@ -220,14 +226,14 @@ export class OpenCodeRuntime implements AgentRuntime {
         signal: controller.signal,
         body: JSON.stringify({
           model: { providerID, modelID },
-          agent,
+          agent: backendAgent,
           parts: [{ type: 'text', text: spec }]
         })
       })
       if (deadlineHit) throw new Error(TURN_DEADLINE_MESSAGE)
       if (this.cancelRequested) throw new Error(TURN_CANCELLED_MESSAGE)
       const text = assistantText(result)
-      this.debug('prompt.response', { promptSequence, durationMs: Date.now() - startedAt, agent, assistantChars: text.length })
+      this.debug('prompt.response', { promptSequence, durationMs: Date.now() - startedAt, agent, backendAgent, assistantChars: text.length })
       return { text }
     } catch (error) {
       if (deadlineHit) {
@@ -556,6 +562,7 @@ function buildOpenCodeConfig(input: {
   baseUrl?: string
   credential?: string
   permission: PermissionPreset
+  agentNames: { build: string; plan: string }
 }): Json {
   const providerOptions: Json = {}
   if (input.baseUrl) providerOptions.baseURL = input.baseUrl
@@ -578,10 +585,18 @@ function buildOpenCodeConfig(input: {
     provider: { [input.providerId]: providerConfig },
     permission: globalPermission,
     agent: {
-      build: { model: input.modelRef },
-      plan: {
+      [input.agentNames.build]: {
+        description: 'Codey private build agent. Executes the active Temporal Vibe or Loop turn.',
+        mode: 'primary',
+        model: input.modelRef,
+        permission: globalPermission
+      },
+      [input.agentNames.plan]: {
+        description: 'Codey private planning agent. Analyzes the workspace without changing it.',
+        mode: 'primary',
         model: input.modelRef,
         permission: {
+          ...globalPermission,
           edit: 'deny',
           bash: 'deny',
           task: 'deny',
